@@ -387,6 +387,25 @@ function App() {
           <Editor
             theme={darkMode ? "vs-dark" : "vs"}
             language={language}
+            beforeMount={(monaco) => {
+              // This is a runner, not a compiler: code is executed server-side,
+              // never type-checked here. Silence semantic diagnostics so imports
+              // like `node:readline` don't show spurious "cannot find module"
+              // errors (no @types/node in the browser). Keep syntax checks.
+              const ts = monaco.languages.typescript;
+              for (const d of [ts.typescriptDefaults, ts.javascriptDefaults]) {
+                d.setDiagnosticsOptions({
+                  noSemanticValidation: true,
+                  noSyntaxValidation: false,
+                });
+                d.setCompilerOptions({
+                  target: ts.ScriptTarget.ESNext,
+                  module: ts.ModuleKind.ESNext,
+                  moduleResolution: ts.ModuleResolutionKind.NodeJs,
+                  allowNonTsExtensions: true,
+                });
+              }
+            }}
             options={{
               automaticLayout: true,
               fontSize: 14,
