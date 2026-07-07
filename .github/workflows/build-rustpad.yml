@@ -12,7 +12,8 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/interview-pad-rustpad
+  # GHCR requires a lowercase repository name (the org is "Rebar-Team").
+  IMAGE: ghcr.io/rebar-team/interview-pad-rustpad
 
 jobs:
   build:
