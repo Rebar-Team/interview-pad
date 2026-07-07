@@ -33,8 +33,21 @@ const LANGS = {
   javascript: { image: "node:22-alpine", ext: "js", cmd: ["node", "/code/main.js"] },
   // Built locally (tsx preinstalled) so TypeScript runs offline. See runtimes/typescript.
   typescript: { image: "interview-pad-ts:local", ext: "ts", cmd: ["tsx", "/code/main.ts"] },
-  // Java expects the public class to be named Main; we always write Main.java.
-  java: { image: "eclipse-temurin:21-jdk", ext: "java", file: "Main.java", cmd: ["sh", "-c", "cd /code && javac Main.java -d /tmp && exec java -cp /tmp Main"] },
+  // Java's file name must match the public class, so derive both from the code.
+  java: {
+    image: "eclipse-temurin:21-jdk",
+    ext: "java",
+    build: (code) => {
+      const m =
+        code.match(/public\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)/) ||
+        code.match(/\bclass\s+([A-Za-z_$][\w$]*)/);
+      const cls = m ? m[1] : "Main";
+      return {
+        file: `${cls}.java`,
+        cmd: ["sh", "-c", `cd /code && javac ${cls}.java -d /tmp && exec java -cp /tmp ${cls}`],
+      };
+    },
+  },
   go: { image: "golang:1.22-alpine", ext: "go", cmd: ["sh", "-c", "cd /code && go run main.go"] },
   c: { image: "gcc:14", ext: "c", cmd: ["sh", "-c", "gcc /code/main.c -o /tmp/a.out && exec /tmp/a.out"] },
   cpp: { image: "gcc:14", ext: "cpp", cmd: ["sh", "-c", "g++ -O2 /code/main.cpp -o /tmp/a.out && exec /tmp/a.out"] },
@@ -93,7 +106,10 @@ function startRun(id, s, lang, code) {
   const dir = path.join(SESSIONS_DIR, id);
   fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
   try { fs.chmodSync(dir, 0o777); } catch {}
-  const filename = spec.file || `main.${spec.ext}`;
+  // Some languages (Java) derive the file name + run command from the code.
+  const built = spec.build ? spec.build(code) : {};
+  const filename = built.file || spec.file || `main.${spec.ext}`;
+  const runCmd = built.cmd || spec.cmd;
   fs.writeFileSync(path.join(dir, filename), code, { mode: 0o666 });
 
   const container = `pad_${id}_${++runCounter}`;
@@ -118,7 +134,7 @@ function startRun(id, s, lang, code) {
     "-e", "GOCACHE=/tmp/.gocache",
     "-e", "GOFLAGS=-mod=mod",
     "-e", "PYTHONDONTWRITEBYTECODE=1",
-    spec.image, ...spec.cmd,
+    spec.image, ...runCmd,
   ];
 
   const term = pty.spawn("docker", args, {
