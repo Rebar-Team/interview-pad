@@ -1,0 +1,24 @@
+# Automatic HTTPS for InterviewPad.
+#
+# Caddy provisions a Let's Encrypt cert for $DOMAIN over the HTTP-01 challenge,
+# so ports 80 and 443 must be publicly reachable and the Cloudflare DNS record
+# should be "DNS only" (grey cloud). See DEPLOY.md for the Cloudflare setup and
+# the alternative (orange-cloud + Cloudflare Origin cert).
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Code execution API -> Judge0. handle_path strips the /judge0 prefix so
+	# the server sees /submissions, /languages, etc. at its root.
+	handle_path /judge0/* {
+		reverse_proxy judge0-server:2358
+	}
+
+	# Everything else -> Rustpad (serves the editor UI and the /api/socket
+	# WebSocket; Caddy proxies WebSockets transparently).
+	reverse_proxy rustpad:3030
+}

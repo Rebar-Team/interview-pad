@@ -1,0 +1,5 @@
+.env
+rustpad/node_modules/
+rustpad/dist/
+rustpad/target/
+rustpad/rustpad-wasm/pkg/
