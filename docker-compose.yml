@@ -32,6 +32,8 @@ services:
     <<: *default-logging
 
   rustpad:
+    # Prefer the CI-built image (fast pull); `--build` rebuilds locally instead.
+    image: ${RUSTPAD_IMAGE:-ghcr.io/rebar-team/interview-pad-rustpad:latest}
     build: ./rustpad
     restart: always
     environment:

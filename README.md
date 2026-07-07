@@ -26,6 +26,10 @@ interview-pad/
 ├── judge0.conf          # Judge0 + Postgres/Redis config (set passwords here)
 ├── .env.example         # DOMAIN, ACME_EMAIL, EXPIRY_DAYS
 ├── DEPLOY.md            # AWS EC2 + Cloudflare step-by-step
+├── scripts/
+│   ├── setup-host.sh    # one-shot EC2 setup (cgroup v1, docker, secrets, up)
+│   └── smoke-test.sh    # verify editor + Judge0 execution end-to-end
+├── .github/workflows/   # CI: build + push Rustpad image to GHCR
 └── rustpad/             # Rustpad source with the Run/Judge0 integration
 ```
 

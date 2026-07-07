@@ -45,21 +45,36 @@ sudo usermod -aG docker ubuntu   # log out/in afterwards
 
 ## 2. Configure and start
 
+### Scripted (recommended)
+
 ```bash
-git clone <your-fork-of-this-repo> interview-pad && cd interview-pad
-
-cp .env.example .env
-# edit .env: set DOMAIN to your interview hostname, ACME_EMAIL to your email
-nano .env
-
-# set the two Judge0 passwords
-nano judge0.conf   # POSTGRES_PASSWORD and REDIS_PASSWORD
-
-docker compose up -d --build
+git clone git@github.com:Rebar-Team/interview-pad.git && cd interview-pad
+./scripts/setup-host.sh interview.example.com you@example.com
 ```
 
-First boot pulls images and compiles the Rustpad image (a few minutes). Check
-progress with `docker compose logs -f`.
+`setup-host.sh` is idempotent. On the first run it applies the cgroup-v1 change
+from step 1a and reboots — **just re-run the same command after the reboot** and
+it installs Docker, generates the Judge0 secrets, pulls the prebuilt Rustpad
+image, and starts everything. (You can skip step 1a/1b if you use the script.)
+
+### Manual
+
+```bash
+git clone git@github.com:Rebar-Team/interview-pad.git && cd interview-pad
+cp .env.example .env && nano .env       # DOMAIN + ACME_EMAIL
+nano judge0.conf                        # set POSTGRES_PASSWORD + REDIS_PASSWORD
+docker compose pull rustpad             # prebuilt image from GHCR (fast)
+docker compose up -d                    # or: up -d --build to compile locally
+```
+
+> **Prebuilt image:** pushes to `main` trigger a GitHub Action that builds and
+> publishes `ghcr.io/rebar-team/interview-pad-rustpad:latest`. Make that package
+> **public** once (GitHub → org Packages → package → Package settings → change
+> visibility) so the box can pull it without a login. Otherwise run
+> `docker compose up -d --build` to compile on the box — use a `t3.medium` for
+> that, as the Rust build can exceed 2 GB RAM.
+
+First boot pulls images (a minute or two). Watch with `docker compose logs -f`.
 
 ---
 
@@ -74,7 +89,12 @@ In the Cloudflare dashboard for your zone:
    working setup.
 
 Then browse to `https://<DOMAIN>`. Caddy issues the cert automatically on the
-first request (give it ~30s).
+first request (give it ~30s). Confirm the whole chain — editor, Judge0, and a
+real code run — with:
+
+```bash
+./scripts/smoke-test.sh <DOMAIN>
+```
 
 <details>
 <summary>Alternative: keep Cloudflare proxy on (orange cloud)</summary>
