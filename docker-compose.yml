@@ -1,9 +1,9 @@
-# InterviewPad — Rustpad (collaborative editor) + Judge0 (code execution),
-# fronted by Caddy for automatic HTTPS.
+# InterviewPad — Rustpad (collaborative editor) + ptyd (interactive terminal
+# runner), fronted by Caddy for automatic HTTPS.
 #
-# Judge0's isolate sandbox needs privileged containers + cgroup access, which
-# is why this runs on a plain VM (EC2) and NOT on Fargate/App Runner. See
-# DEPLOY.md for the host cgroup-v1 requirement.
+# Code runs in an interactive PTY: ptyd launches each run in a sandboxed sibling
+# container (via the mounted docker socket) and streams the terminal over a
+# WebSocket, so interviewer and candidate share one live terminal.
 
 x-logging: &default-logging
   logging:
@@ -28,7 +28,7 @@ services:
       - caddy-config:/config
     depends_on:
       - rustpad
-      - judge0-server
+      - ptyd
     <<: *default-logging
 
   rustpad:
@@ -37,7 +37,6 @@ services:
     build: ./rustpad
     restart: always
     environment:
-      # Persist pads to SQLite so interview sessions survive restarts.
       SQLITE_URI: /data/rustpad.db
       EXPIRY_DAYS: ${EXPIRY_DAYS:-30}
       RUST_LOG: info
@@ -45,54 +44,22 @@ services:
       - rustpad-data:/data
     <<: *default-logging
 
-  judge0-server:
-    image: judge0/judge0:1.13.1
+  ptyd:
+    build: ./ptyd
     restart: always
-    privileged: true
+    environment:
+      # Compose prefixes volume names with the project (dir) name.
+      SESSIONS_VOLUME: interview-pad_pty-sessions
+      SESSIONS_DIR: /sessions
     volumes:
-      - ./judge0.conf:/judge0.conf:ro
-    depends_on:
-      - db
-      - redis
-    <<: *default-logging
-
-  judge0-workers:
-    image: judge0/judge0:1.13.1
-    command: ["./scripts/workers"]
-    restart: always
-    privileged: true
-    volumes:
-      - ./judge0.conf:/judge0.conf:ro
-    depends_on:
-      - db
-      - redis
-    <<: *default-logging
-
-  db:
-    image: postgres:13.0
-    restart: always
-    env_file: judge0.conf
-    volumes:
-      - postgres-data:/var/lib/postgresql/data/
-    <<: *default-logging
-
-  redis:
-    image: redis:6.2.6
-    restart: always
-    command:
-      [
-        "bash",
-        "-c",
-        'docker-entrypoint.sh --appendonly no --requirepass "$$REDIS_PASSWORD"',
-      ]
-    env_file: judge0.conf
-    volumes:
-      - redis-data:/data
+      # ptyd launches sandboxed sibling containers on the host's Docker.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Code for each run is written here and bind-mounted into the run container.
+      - pty-sessions:/sessions
     <<: *default-logging
 
 volumes:
   caddy-data:
   caddy-config:
   rustpad-data:
-  postgres-data:
-  redis-data:
+  pty-sessions:

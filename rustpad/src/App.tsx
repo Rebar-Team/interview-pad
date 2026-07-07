@@ -4,7 +4,6 @@ import {
   Flex,
   HStack,
   Icon,
-  Spinner,
   Text,
   useToast,
 } from "@chakra-ui/react";
@@ -16,11 +15,10 @@ import useLocalStorageState from "use-local-storage-state";
 
 import rustpadRaw from "../rustpad-server/src/rustpad.rs?raw";
 import Footer from "./Footer";
-import OutputPanel, { OutputState } from "./OutputPanel";
 import ReadCodeConfirm from "./ReadCodeConfirm";
 import Sidebar from "./Sidebar";
+import Terminal, { TerminalHandle, isRunnable } from "./Terminal";
 import animals from "./animals.json";
-import { isRunnable, runCode } from "./judge0";
 import languages from "./languages.json";
 import Rustpad, { UserInfo } from "./rustpad";
 import useHash from "./useHash";
@@ -61,11 +59,9 @@ function App() {
 
   const [readCodeConfirmOpen, setReadCodeConfirmOpen] = useState(false);
 
-  // Code-execution (Judge0) state.
-  const [output, setOutput] = useState<OutputState>({ kind: "idle" });
-  const [showOutput, setShowOutput] = useState(false);
-  const [stdin, setStdin] = useState("");
-  const running = output.kind === "running";
+  // Interactive terminal (ptyd) state.
+  const termRef = useRef<TerminalHandle>(null);
+  const [showTerminal, setShowTerminal] = useState(true);
 
   useEffect(() => {
     if (editor?.getModel()) {
@@ -127,7 +123,7 @@ function App() {
     }
   }
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     const model = editor?.getModel();
     if (!model) return;
     if (!isRunnable(language)) {
@@ -140,21 +136,12 @@ function App() {
       });
       return;
     }
-    setShowOutput(true);
-    setOutput({ kind: "running" });
-    try {
-      const result = await runCode(language, model.getValue(), stdin);
-      setOutput({ kind: "result", result });
-    } catch (err) {
-      setOutput({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, [editor, language, stdin, toast]);
+    setShowTerminal(true);
+    termRef.current?.run(language, model.getValue());
+  }, [editor, language, toast]);
 
-  // Cmd/Ctrl+Enter runs the pad. We route through a ref so the always-on
-  // key listener calls the latest handleRun without rebinding each render.
+  // Cmd/Ctrl+Enter runs the pad. Routed through a ref so the always-on key
+  // listener calls the latest handleRun without rebinding each render.
   const handleRunRef = useRef(handleRun);
   handleRunRef.current = handleRun;
   useEffect(() => {
@@ -219,8 +206,8 @@ function App() {
           size="xs"
           w="6rem"
           colorScheme="green"
-          leftIcon={running ? undefined : <VscPlay />}
-          isDisabled={running || !isRunnable(language)}
+          leftIcon={<VscPlay />}
+          isDisabled={!isRunnable(language)}
           onClick={handleRun}
           title={
             isRunnable(language)
@@ -228,7 +215,7 @@ function App() {
               : `${language} is not executable`
           }
         >
-          {running ? <Spinner size="xs" /> : "Run"}
+          Run
         </Button>
       </Flex>
       <Flex flex="1 0" minH={0}>
@@ -281,14 +268,13 @@ function App() {
               onMount={(editor) => setEditor(editor)}
             />
           </Box>
-          {showOutput && (
-            <Box h="38%" minH="140px" flexShrink={0}>
-              <OutputPanel
+          {showTerminal && (
+            <Box h="40%" minH="160px" flexShrink={0}>
+              <Terminal
+                ref={termRef}
+                padId={id}
                 darkMode={darkMode}
-                state={output}
-                stdin={stdin}
-                onChangeStdin={setStdin}
-                onClose={() => setShowOutput(false)}
+                onClose={() => setShowTerminal(false)}
               />
             </Box>
           )}

@@ -2,8 +2,7 @@
 #
 # Caddy provisions a Let's Encrypt cert for $DOMAIN over the HTTP-01 challenge,
 # so ports 80 and 443 must be publicly reachable and the Cloudflare DNS record
-# should be "DNS only" (grey cloud). See DEPLOY.md for the Cloudflare setup and
-# the alternative (orange-cloud + Cloudflare Origin cert).
+# should be "DNS only" (grey cloud). See DEPLOY.md.
 
 {
 	email {$ACME_EMAIL}
@@ -12,13 +11,12 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	# Code execution API -> Judge0. handle_path strips the /judge0 prefix so
-	# the server sees /submissions, /languages, etc. at its root.
-	handle_path /judge0/* {
-		reverse_proxy judge0-server:2358
+	# Interactive terminal WebSocket -> ptyd. handle_path strips /pty so ptyd
+	# sees /<padId>.
+	handle_path /pty/* {
+		reverse_proxy ptyd:8081
 	}
 
-	# Everything else -> Rustpad (serves the editor UI and the /api/socket
-	# WebSocket; Caddy proxies WebSockets transparently).
+	# Everything else -> Rustpad (editor UI + /api/socket collaboration WS).
 	reverse_proxy rustpad:3030
 }

@@ -52,20 +52,13 @@ if [[ ! -f .env ]]; then
   echo "==> Wrote .env (DOMAIN=${DOMAIN})."
 fi
 
-if grep -q "CHANGE_ME" judge0.conf; then
-  echo "==> Generating Judge0 secrets..."
-  sed -i "s|CHANGE_ME_postgres_password|$(openssl rand -hex 24)|" judge0.conf
-  sed -i "s|CHANGE_ME_redis_password|$(openssl rand -hex 24)|" judge0.conf
-fi
+# --- 4. Language runtimes ----------------------------------------------------
+echo "==> Preparing language runtimes (pull images + build TypeScript runtime)..."
+./scripts/prepare-runtimes.sh
 
-# --- 4. Bring up -------------------------------------------------------------
-echo "==> Pulling images..."
-if $DOCKER compose pull rustpad 2>/dev/null; then
-  $DOCKER compose up -d
-else
-  echo "==> Prebuilt Rustpad image unavailable; building locally (slow on small instances)..."
-  $DOCKER compose up -d --build
-fi
+# --- 5. Bring up -------------------------------------------------------------
+echo "==> Building and starting the stack..."
+$DOCKER compose up -d --build
 
 echo
 echo "==> Up. Point a Cloudflare A record (grey cloud) at this box's IP for \"$DOMAIN\","

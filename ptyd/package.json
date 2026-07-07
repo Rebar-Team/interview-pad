@@ -1,0 +1,18 @@
+{
+  "name": "interview-pad-ptyd",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive PTY runner for InterviewPad — streams a sandboxed container's terminal over WebSocket",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
