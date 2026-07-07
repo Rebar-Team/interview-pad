@@ -5,7 +5,7 @@ import {
   useImperativeHandle,
   useRef,
 } from "react";
-import { VscChevronDown, VscTerminal } from "react-icons/vsc";
+import { VscChevronDown, VscClearAll, VscDebugStop, VscTerminal } from "react-icons/vsc";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -31,6 +31,7 @@ type TerminalProps = {
   padId: string;
   darkMode: boolean;
   onClose: () => void;
+  onRunningChange?: (running: boolean) => void;
 };
 
 function ptyUri(id: string) {
@@ -40,7 +41,7 @@ function ptyUri(id: string) {
 }
 
 const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
-  { padId, darkMode, onClose },
+  { padId, darkMode, onClose, onRunningChange },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -48,6 +49,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
   const fit = useRef<FitAddon>();
   const ws = useRef<WebSocket>();
   const pending = useRef<object | null>(null); // a run queued until the socket opens
+  const runningCb = useRef(onRunningChange);
+  runningCb.current = onRunningChange;
 
   // Send helper — opens/reopens the socket if needed and flushes a queued run.
   function connect() {
@@ -65,7 +68,10 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
       const t = term.current;
       if (!t) return;
       if (m.t === "out" || m.t === "info") t.write(m.d ?? "");
-      else if (m.t === "exit") t.write(`\r\n\x1b[90m[process exited with code ${m.code}]\x1b[0m\r\n`);
+      else if (m.t === "exit") {
+        t.write(`\r\n\x1b[90m[process exited with code ${m.code}]\x1b[0m\r\n`);
+        runningCb.current?.(false);
+      }
     };
     sock.onclose = () => { if (ws.current === sock) ws.current = undefined; };
   }
@@ -82,9 +88,20 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
       const cols = t?.cols ?? 80;
       const rows = t?.rows ?? 24;
       send({ t: "run", lang, code, cols, rows });
+      runningCb.current?.(true);
       t?.focus();
     },
   }));
+
+  function clearTerminal() {
+    term.current?.clear();
+    send({ t: "clear" });
+  }
+
+  function stopRun() {
+    send({ t: "stop" });
+    runningCb.current?.(false);
+  }
 
   // Create the xterm instance once.
   useEffect(() => {
@@ -147,7 +164,11 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
           <Icon as={VscTerminal} fontSize="sm" />
           <Text fontSize="xs" fontWeight="medium">Terminal</Text>
         </HStack>
-        <IconButton aria-label="Collapse terminal" icon={<VscChevronDown />} size="xs" variant="ghost" onClick={onClose} />
+        <HStack spacing={0}>
+          <IconButton aria-label="Stop" title="Stop the running program" icon={<VscDebugStop />} size="xs" variant="ghost" onClick={stopRun} />
+          <IconButton aria-label="Clear" title="Clear terminal" icon={<VscClearAll />} size="xs" variant="ghost" onClick={clearTerminal} />
+          <IconButton aria-label="Collapse terminal" title="Hide terminal" icon={<VscChevronDown />} size="xs" variant="ghost" onClick={onClose} />
+        </HStack>
       </HStack>
       <Box ref={boxRef} flex={1} minH={0} px={1} py={1} />
     </Flex>

@@ -174,6 +174,14 @@ wss.on("connection", (ws, req) => {
       s.cols = m.cols || s.cols;
       s.rows = m.rows || s.rows;
       if (s.pty) { try { s.pty.resize(s.cols, s.rows); } catch {} }
+    } else if (m.t === "clear") {
+      s.buffer = "";
+      broadcast(s, { t: "out", d: "\x1b[2J\x1b[3J\x1b[H" });
+    } else if (m.t === "stop") {
+      if (s.pty) {
+        stopRun(s);
+        broadcast(s, { t: "info", d: "\r\n\x1b[90m[stopped]\x1b[0m\r\n" });
+      }
     }
   });
 

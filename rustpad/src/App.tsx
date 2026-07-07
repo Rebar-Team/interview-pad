@@ -16,6 +16,7 @@ import {
   PopoverBody,
   PopoverContent,
   PopoverTrigger,
+  Spinner,
   Text,
   Tooltip,
   useToast,
@@ -91,6 +92,7 @@ function App() {
 
   const termRef = useRef<TerminalHandle>(null);
   const [showTerminal, setShowTerminal] = useState(true);
+  const [running, setRunning] = useState(false);
 
   useEffect(() => {
     if (editor?.getModel()) {
@@ -364,15 +366,18 @@ function App() {
         <Button
           size="sm"
           px={5}
+          minW="90px"
           colorScheme="green"
-          leftIcon={<VscPlay />}
+          leftIcon={running ? <Spinner size="xs" /> : <VscPlay />}
           isDisabled={!isRunnable(language)}
           onClick={handleRun}
           title={
-            isRunnable(language) ? "Run (⌘/Ctrl + Enter)" : `${languageLabel(language)} is not runnable`
+            isRunnable(language)
+              ? "Run (⌘/Ctrl + Enter)"
+              : `${languageLabel(language)} is not runnable`
           }
         >
-          Run
+          {running ? "Running" : "Run"}
         </Button>
       </Flex>
 
@@ -401,6 +406,7 @@ function App() {
                 padId={id}
                 darkMode={darkMode}
                 onClose={() => setShowTerminal(false)}
+                onRunningChange={setRunning}
               />
             </Box>
           </>
