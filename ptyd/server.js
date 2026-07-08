@@ -161,7 +161,10 @@ function runCode(id, s, lang, code) {
     return;
   }
   const resolved = spec.resolve ? spec.resolve(code) : { file: spec.file, cmd: spec.cmd(spec.file) };
-  fs.writeFileSync(path.join(SESSIONS_DIR, id, resolved.file), code, { mode: 0o666 });
+  const dir = path.join(SESSIONS_DIR, id);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+  try { fs.chmodSync(dir, 0o777); } catch {}
+  fs.writeFileSync(path.join(dir, resolved.file), code, { mode: 0o666 });
 
   const fresh = !s.pty || s.lang !== lang;
   ensureShell(id, s, lang);
@@ -193,25 +196,31 @@ wss.on("connection", (ws, req) => {
   ws.on("message", (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
-    if (m.t === "shell") {
-      s.cols = m.cols || s.cols;
-      s.rows = m.rows || s.rows;
-      ensureShell(id, s, String(m.lang || ""));
-    } else if (m.t === "run") {
-      s.cols = m.cols || s.cols;
-      s.rows = m.rows || s.rows;
-      runCode(id, s, String(m.lang || ""), String(m.code ?? ""));
-    } else if (m.t === "in") {
-      if (s.pty) s.pty.write(m.d);
-    } else if (m.t === "resize") {
-      s.cols = m.cols || s.cols;
-      s.rows = m.rows || s.rows;
-      if (s.pty) { try { s.pty.resize(s.cols, s.rows); } catch {} }
-    } else if (m.t === "clear") {
-      s.buffer = "";
-      broadcast(s, { t: "out", d: "\x1b[2J\x1b[3J\x1b[H" });
-    } else if (m.t === "stop") {
-      if (s.pty) s.pty.write("\x03"); // Ctrl-C interrupts the running program
+    // Never let a single bad message crash the service for every pad.
+    try {
+      if (m.t === "shell") {
+        s.cols = m.cols || s.cols;
+        s.rows = m.rows || s.rows;
+        ensureShell(id, s, String(m.lang || ""));
+      } else if (m.t === "run") {
+        s.cols = m.cols || s.cols;
+        s.rows = m.rows || s.rows;
+        runCode(id, s, String(m.lang || ""), String(m.code ?? ""));
+      } else if (m.t === "in") {
+        if (s.pty) s.pty.write(m.d);
+      } else if (m.t === "resize") {
+        s.cols = m.cols || s.cols;
+        s.rows = m.rows || s.rows;
+        if (s.pty) { try { s.pty.resize(s.cols, s.rows); } catch {} }
+      } else if (m.t === "clear") {
+        s.buffer = "";
+        broadcast(s, { t: "out", d: "\x1b[2J\x1b[3J\x1b[H" });
+      } else if (m.t === "stop") {
+        if (s.pty) s.pty.write("\x03"); // Ctrl-C interrupts the running program
+      }
+    } catch (err) {
+      console.error("message handler error:", err);
+      send(ws, { t: "info", d: `\r\n\x1b[31m[ptyd error: ${err.message}]\x1b[0m\r\n` });
     }
   });
 
