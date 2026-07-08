@@ -11,6 +11,12 @@ import {
   MenuButton,
   MenuItem,
   MenuList,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  ModalOverlay,
   Popover,
   PopoverArrow,
   PopoverBody,
@@ -93,6 +99,17 @@ function App() {
   const termRef = useRef<TerminalHandle>(null);
   const [showTerminal, setShowTerminal] = useState(true);
   const [running, setRunning] = useState(false);
+
+  // First-visit name prompt (remembered across sessions).
+  const [nameAsked, setNameAsked] = useLocalStorageState("nameAsked", {
+    defaultValue: false,
+  });
+  const [nameDraft, setNameDraft] = useState("");
+  function submitName() {
+    const n = nameDraft.trim();
+    if (n) setName(n);
+    setNameAsked(true);
+  }
 
   useEffect(() => {
     if (editor?.getModel()) {
@@ -432,6 +449,33 @@ function App() {
           </>
         )}
       </Flex>
+
+      {/* First-visit name prompt */}
+      <Modal isOpen={!nameAsked} onClose={() => setNameAsked(true)} isCentered>
+        <ModalOverlay />
+        <ModalContent bg={darkMode ? "#252526" : "white"} color={fg}>
+          <ModalHeader>Welcome to RebarPad</ModalHeader>
+          <ModalBody>
+            <Text fontSize="sm" color={subtle} mb={2}>
+              What should we call you? Others in the pad will see this name.
+            </Text>
+            <Input
+              autoFocus
+              placeholder={name}
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitName()}
+              bg={darkMode ? "#1e1e1e" : "white"}
+              borderColor={border}
+            />
+          </ModalBody>
+          <ModalFooter>
+            <Button colorScheme="green" onClick={submitName}>
+              Join
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
     </Flex>
   );
 }
