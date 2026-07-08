@@ -49,6 +49,14 @@ docker compose up -d --build
 > Desktop for Mac/Windows (cgroup v2). The collaborative editor works anywhere;
 > only the Run button needs the Linux/cgroup-v1 host. Details in DEPLOY.md.
 
+## Continuous deployment
+
+A systemd timer on the box (`scripts/autodeploy.sh` +
+`scripts/systemd/interview-pad-autodeploy.*`) checks `origin/main` every ~60s
+and, when it moves, fast-forwards and runs `scripts/deploy.sh`
+(`docker compose up -d --build --force-recreate`). So a push to `main` is live
+within ~1–2 minutes — no secrets or inbound access required.
+
 ## How execution works
 
 The frontend POSTs the buffer to `/judge0/submissions?wait=true` (same origin;
