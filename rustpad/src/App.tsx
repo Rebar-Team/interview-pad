@@ -424,6 +424,7 @@ function App() {
                 ref={termRef}
                 padId={id}
                 darkMode={darkMode}
+                language={language}
                 onClose={() => setShowTerminal(false)}
                 onRunningChange={setRunning}
               />

@@ -30,6 +30,7 @@ export type TerminalHandle = { run: (lang: string, code: string) => void };
 type TerminalProps = {
   padId: string;
   darkMode: boolean;
+  language: string;
   onClose: () => void;
   onRunningChange?: (running: boolean) => void;
 };
@@ -41,7 +42,7 @@ function ptyUri(id: string) {
 }
 
 const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
-  { padId, darkMode, onClose, onRunningChange },
+  { padId, darkMode, language, onClose, onRunningChange },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -51,6 +52,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
   const pending = useRef<object | null>(null); // a run queued until the socket opens
   const runningCb = useRef(onRunningChange);
   runningCb.current = onRunningChange;
+  const langRef = useRef(language);
+  langRef.current = language;
 
   // Send helper — opens/reopens the socket if needed and flushes a queued run.
   function connect() {
@@ -60,6 +63,9 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
     const sock = new WebSocket(ptyUri(padId));
     ws.current = sock;
     sock.onopen = () => {
+      // Start (or attach to) the sandboxed shell for the current language so the
+      // terminal is immediately typeable.
+      sock.send(JSON.stringify({ t: "shell", lang: langRef.current, cols: term.current?.cols, rows: term.current?.rows }));
       if (pending.current) { sock.send(JSON.stringify(pending.current)); pending.current = null; }
     };
     sock.onmessage = (ev) => {
@@ -144,6 +150,14 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [padId]);
+
+  // Swap the sandboxed shell when the language changes.
+  useEffect(() => {
+    const sock = ws.current;
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify({ t: "shell", lang: language }));
+    }
+  }, [language]);
 
   // React to theme changes without recreating the terminal.
   useEffect(() => {

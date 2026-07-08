@@ -1,13 +1,18 @@
-// ptyd — interactive PTY runner for InterviewPad.
+// ptyd — interactive sandboxed shell per pad for InterviewPad.
 //
-// One shared pseudo-terminal per pad. On a "run" message we (re)launch the
-// pad's current code inside a locked-down sibling container attached to a PTY,
-// and stream its terminal both ways over WebSocket. Every socket on the same
-// pad id shares the same terminal: all see the output, any can type.
+// Each pad gets ONE long-lived, locked-down container running an interactive
+// shell attached to a PTY, streamed over WebSocket. The terminal is therefore
+// always typeable (a real sandboxed shell), and "Run" just injects the compile
+// / run command for the selected language into that shell. Because the
+// container stays warm, repeat runs skip container startup, and language build
+// caches (e.g. Go's) persist in the pad's volume.
 //
-// Protocol (JSON, both directions):
-//   client -> server: {t:"run", lang, code} | {t:"in", d} | {t:"resize", cols, rows}
-//   server -> client: {t:"out", d} | {t:"exit", code} | {t:"info", d}
+// Every socket on the same pad shares the shell: all see it, any can type.
+//
+// Protocol (JSON):
+//   client -> server: {t:"shell", lang} | {t:"run", lang, code} | {t:"in", d}
+//                      | {t:"resize", cols, rows} | {t:"clear"} | {t:"stop"}
+//   server -> client: {t:"out", d} | {t:"exit"} | {t:"info", d}
 
 import http from "node:http";
 import fs from "node:fs";
@@ -17,43 +22,41 @@ import { WebSocketServer } from "ws";
 import pty from "node-pty";
 
 const PORT = process.env.PORT || 8081;
-// A named docker volume shared with each run container via a per-pad subpath.
-// ptyd mounts it at /sessions; children mount <subpath> at /code.
 const SESSIONS_VOLUME = process.env.SESSIONS_VOLUME || "interview-pad_pty-sessions";
 const SESSIONS_DIR = process.env.SESSIONS_DIR || "/sessions";
-const IDLE_KILL_MS = 60_000; // kill a run this long after the last client leaves
-const MAX_RUN_MS = 60 * 60_000; // hard lifetime cap per run
-const SCROLLBACK_BYTES = 256 * 1024; // replayed to late joiners
+const IDLE_KILL_MS = 90_000; // kill the shell this long after the last client leaves
+const SCROLLBACK_BYTES = 256 * 1024;
 
-// language id (Monaco) -> { image, ext, cmd }. cmd runs inside the container;
-// compiled langs compile then exec in the same TTY. All images are self-contained
-// so runs work with --network none.
+// Invisible OSC marker printed after a run command completes; xterm ignores
+// unknown OSC sequences, so it never shows, but ptyd detects it to know the
+// program finished (drives the Run button's "Running" state).
+const DONE_MARKER = "\x1b]777;ipdone\x07";
+const DONE_PRINTF = "; printf '\\033]777;ipdone\\007'\r";
+
+// language id (Monaco) -> shell image + how to run a file in it.
+// `debian`/`alpine` decides which shell binary the container has.
 const LANGS = {
-  python: { image: "python:3.12-slim", ext: "py", cmd: ["python3", "-u", "/code/main.py"] },
-  javascript: { image: "node:22-alpine", ext: "js", cmd: ["node", "/code/main.js"] },
-  // Built locally (tsx preinstalled) so TypeScript runs offline. See runtimes/typescript.
-  typescript: { image: "interview-pad-ts:local", ext: "ts", cmd: ["tsx", "/code/main.ts"] },
-  // Java's file name must match the public class, so derive both from the code.
+  python: { image: "python:3.12-slim", shell: ["bash", "--norc"], file: "main.py", cmd: (f) => `python3 -u /code/${f}` },
+  javascript: { image: "node:22-alpine", shell: ["sh"], file: "main.js", cmd: (f) => `node /code/${f}` },
+  typescript: { image: "interview-pad-ts:local", shell: ["bash", "--norc"], file: "main.ts", cmd: (f) => `tsx /code/${f}` },
   java: {
     image: "eclipse-temurin:21-jdk",
-    ext: "java",
-    build: (code) => {
+    shell: ["bash", "--norc"],
+    // File name must match the public class, so derive both from the code.
+    resolve: (code) => {
       const m =
         code.match(/public\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)/) ||
         code.match(/\bclass\s+([A-Za-z_$][\w$]*)/);
       const cls = m ? m[1] : "Main";
-      return {
-        file: `${cls}.java`,
-        cmd: ["sh", "-c", `cd /code && javac ${cls}.java -d /tmp && exec java -cp /tmp ${cls}`],
-      };
+      return { file: `${cls}.java`, cmd: `cd /code && javac ${cls}.java -d /tmp && java -cp /tmp ${cls}` };
     },
   },
-  go: { image: "golang:1.22-alpine", ext: "go", cmd: ["sh", "-c", "cd /code && go run main.go"] },
-  c: { image: "gcc:14", ext: "c", cmd: ["sh", "-c", "gcc /code/main.c -o /tmp/a.out && exec /tmp/a.out"] },
-  cpp: { image: "gcc:14", ext: "cpp", cmd: ["sh", "-c", "g++ -O2 /code/main.cpp -o /tmp/a.out && exec /tmp/a.out"] },
+  go: { image: "golang:1.22-alpine", shell: ["sh"], file: "main.go", cmd: () => `cd /code && go run main.go` },
+  c: { image: "gcc:14", shell: ["bash", "--norc"], file: "main.c", cmd: (f) => `gcc /code/${f} -o /tmp/a && /tmp/a` },
+  cpp: { image: "gcc:14", shell: ["bash", "--norc"], file: "main.cpp", cmd: (f) => `g++ -O2 /code/${f} -o /tmp/a && /tmp/a` },
 };
 
-const sessions = new Map(); // id -> { clients:Set<ws>, pty, container, buffer, idleTimer, lifeTimer, cols, rows }
+const sessions = new Map();
 
 function sanitizeId(raw) {
   const id = String(raw || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
@@ -63,7 +66,7 @@ function sanitizeId(raw) {
 function getSession(id) {
   let s = sessions.get(id);
   if (!s) {
-    s = { clients: new Set(), pty: null, container: null, buffer: "", idleTimer: null, lifeTimer: null, cols: 80, rows: 24 };
+    s = { clients: new Set(), pty: null, container: null, lang: null, buffer: "", tail: "", startedAt: 0, idleTimer: null, cols: 80, rows: 24 };
     sessions.set(id, s);
   }
   return s;
@@ -72,51 +75,36 @@ function getSession(id) {
 function send(ws, obj) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
 }
-
 function broadcast(s, obj) {
   const msg = JSON.stringify(obj);
   for (const ws of s.clients) if (ws.readyState === ws.OPEN) ws.send(msg);
 }
-
 function appendBuffer(s, data) {
   s.buffer += data;
   if (s.buffer.length > SCROLLBACK_BYTES) s.buffer = s.buffer.slice(-SCROLLBACK_BYTES);
 }
 
-function stopRun(s) {
-  if (s.lifeTimer) { clearTimeout(s.lifeTimer); s.lifeTimer = null; }
+function stopShell(s) {
   const container = s.container;
   if (s.pty) { try { s.pty.kill(); } catch {} s.pty = null; }
   s.container = null;
-  // Ensure the sibling container is gone even if killing the client didn't stop it.
+  s.lang = null;
   if (container) execFile("docker", ["kill", container], () => {});
 }
 
-let runCounter = 0;
+let counter = 0;
 
-function startRun(id, s, lang, code) {
+// Start (or restart) the pad's shell container for a language.
+function startShell(id, s, lang) {
   const spec = LANGS[lang];
-  if (!spec) {
-    broadcast(s, { t: "info", d: `\r\n[interview-pad] "${lang}" isn't runnable here.\r\n` });
-    return;
-  }
-  stopRun(s);
+  if (!spec) return;
+  stopShell(s);
 
-  // Write the code into the shared sessions volume under this pad's subpath.
   const dir = path.join(SESSIONS_DIR, id);
   fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
   try { fs.chmodSync(dir, 0o777); } catch {}
-  // Some languages (Java) derive the file name + run command from the code.
-  const built = spec.build ? spec.build(code) : {};
-  const filename = built.file || spec.file || `main.${spec.ext}`;
-  const runCmd = built.cmd || spec.cmd;
-  fs.writeFileSync(path.join(dir, filename), code, { mode: 0o666 });
 
-  const container = `pad_${id}_${++runCounter}`;
-  s.container = container;
-  s.buffer = "";
-  broadcast(s, { t: "info", d: "\x1b[2J\x1b[H" }); // clear terminals
-
+  const container = `pad_${id}_${++counter}`;
   const args = [
     "run", "--rm", "-i", "-t",
     "--name", container,
@@ -131,33 +119,58 @@ function startRun(id, s, lang, code) {
     "-w", "/code",
     "--tmpfs", "/tmp:size=128m,exec,mode=1777",
     "-e", "HOME=/tmp",
-    // Persist Go's build cache in the per-pad volume so repeat runs reuse the
-    // compiled stdlib instead of rebuilding it (~6.7s cold -> ~1s warm).
     "-e", "GOCACHE=/code/.gocache",
     "-e", "GOFLAGS=-mod=mod",
     "-e", "PYTHONDONTWRITEBYTECODE=1",
-    spec.image, ...runCmd,
+    "-e", "PS1=$ ",
+    "-e", "TERM=xterm-256color",
+    spec.image, ...spec.shell,
   ];
 
-  const term = pty.spawn("docker", args, {
-    name: "xterm-color",
-    cols: s.cols,
-    rows: s.rows,
-    cwd: "/tmp",
-    env: process.env,
-  });
+  const term = pty.spawn("docker", args, { name: "xterm-256color", cols: s.cols, rows: s.rows, env: process.env });
   s.pty = term;
+  s.container = container;
+  s.lang = lang;
+  s.tail = "";
+  s.startedAt = Date.now();
 
-  term.onData((data) => { appendBuffer(s, data); broadcast(s, { t: "out", d: data }); });
-  term.onExit(({ exitCode }) => {
-    if (s.pty === term) s.pty = null;
-    broadcast(s, { t: "exit", code: exitCode });
+  term.onData((data) => {
+    appendBuffer(s, data);
+    broadcast(s, { t: "out", d: data });
+    // Detect the invisible run-complete marker (may span chunks). Check the
+    // full combined buffer before truncating so a marker followed by more data
+    // in the same chunk isn't missed.
+    const combined = s.tail + data;
+    if (combined.includes(DONE_MARKER)) broadcast(s, { t: "exit" });
+    s.tail = combined.slice(-(DONE_MARKER.length - 1));
   });
+  term.onExit(() => {
+    if (s.pty === term) { s.pty = null; s.lang = null; }
+    broadcast(s, { t: "exit" });
+  });
+}
 
-  s.lifeTimer = setTimeout(() => {
-    broadcast(s, { t: "info", d: "\r\n[interview-pad] run exceeded time limit; stopped.\r\n" });
-    stopRun(s);
-  }, MAX_RUN_MS);
+function ensureShell(id, s, lang) {
+  if (!s.pty || s.lang !== lang) startShell(id, s, lang);
+}
+
+function runCode(id, s, lang, code) {
+  const spec = LANGS[lang];
+  if (!spec) {
+    broadcast(s, { t: "info", d: `\r\n\x1b[90m[${lang} isn't runnable]\x1b[0m\r\n` });
+    return;
+  }
+  const resolved = spec.resolve ? spec.resolve(code) : { file: spec.file, cmd: spec.cmd(spec.file) };
+  fs.writeFileSync(path.join(SESSIONS_DIR, id, resolved.file), code, { mode: 0o666 });
+
+  const fresh = !s.pty || s.lang !== lang;
+  ensureShell(id, s, lang);
+
+  // Ctrl-U clears any partial input, then run + the completion marker.
+  const inject = "\x15" + resolved.cmd + DONE_PRINTF;
+  // A freshly started shell needs a moment before it reads stdin.
+  if (fresh) setTimeout(() => { if (s.pty) s.pty.write(inject); }, 900);
+  else s.pty.write(inject);
 }
 
 const server = http.createServer((req, res) => {
@@ -168,7 +181,6 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws, req) => {
-  // Caddy strips the /pty prefix, so the path is /<padId>.
   const id = sanitizeId((req.url || "").split("?")[0].replace(/^\/+/, ""));
   if (!id) { ws.close(1008, "bad session id"); return; }
 
@@ -176,16 +188,19 @@ wss.on("connection", (ws, req) => {
   s.clients.add(ws);
   if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
 
-  // Replay current screen to a late joiner.
-  if (s.buffer) send(ws, { t: "out", d: s.buffer });
+  if (s.buffer) send(ws, { t: "out", d: s.buffer }); // replay screen to late joiners
 
   ws.on("message", (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
-    if (m.t === "run") {
+    if (m.t === "shell") {
       s.cols = m.cols || s.cols;
       s.rows = m.rows || s.rows;
-      startRun(id, s, String(m.lang || ""), String(m.code ?? ""));
+      ensureShell(id, s, String(m.lang || ""));
+    } else if (m.t === "run") {
+      s.cols = m.cols || s.cols;
+      s.rows = m.rows || s.rows;
+      runCode(id, s, String(m.lang || ""), String(m.code ?? ""));
     } else if (m.t === "in") {
       if (s.pty) s.pty.write(m.d);
     } else if (m.t === "resize") {
@@ -196,10 +211,7 @@ wss.on("connection", (ws, req) => {
       s.buffer = "";
       broadcast(s, { t: "out", d: "\x1b[2J\x1b[3J\x1b[H" });
     } else if (m.t === "stop") {
-      if (s.pty) {
-        stopRun(s);
-        broadcast(s, { t: "info", d: "\r\n\x1b[90m[stopped]\x1b[0m\r\n" });
-      }
+      if (s.pty) s.pty.write("\x03"); // Ctrl-C interrupts the running program
     }
   });
 
@@ -207,7 +219,7 @@ wss.on("connection", (ws, req) => {
     s.clients.delete(ws);
     if (s.clients.size === 0) {
       s.idleTimer = setTimeout(() => {
-        stopRun(s);
+        stopShell(s);
         sessions.delete(id);
       }, IDLE_KILL_MS);
     }
