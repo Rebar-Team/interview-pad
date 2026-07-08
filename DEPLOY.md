@@ -15,13 +15,28 @@ The live deployment: **https://interview.withrebar.ai** (AWS account 703,
 
 ## 1. Launch the EC2 instance
 
+Use **`scripts/launch-ec2.sh`** — it bakes in the hardened settings (IMDSv2
+required, encrypted gp3 root, public subnet) so they can't be forgotten:
+
+```bash
+./scripts/launch-ec2.sh            # prints the new instance id
+# then associate your Elastic IP:
+aws ec2 associate-address --instance-id i-xxxx --allocation-id eipalloc-xxxx
+```
+
+What it sets, and why it matters:
+
 - **AMI:** Ubuntu 22.04 LTS, **x86_64** (matches the language images in use).
-- **Type:** `t3.small` (2 vCPU / 2 GB) handles 1:1 interviews. The Rust build
-  uses swap (set up by the script); `t3.medium` builds faster if you prefer.
-- **Disk:** 30 GB gp3.
-- **Networking:** launch in a **public subnet** (one with a `0.0.0.0/0` route to
-  an Internet Gateway — not a NAT-only subnet), and attach an **Elastic IP** so
-  the address survives stop/start.
+- **Type:** `t3.small` (2 vCPU / 2 GB) handles 1:1 interviews; `t3.medium`
+  builds faster.
+- **Disk:** 30 GB gp3, **encrypted**.
+- **IMDSv2 required** (`HttpTokens=required`, hop limit 1) — this is a launch-time
+  setting, so relaunching *without* the script reintroduces the "EC2 uses
+  IMDSv1" finding. Always launch via the script (or pass the same
+  `--metadata-options`).
+- **Networking:** a **public subnet** (with a `0.0.0.0/0` route to an Internet
+  Gateway — not a NAT-only subnet) + an **Elastic IP** so the address survives
+  stop/start.
 - **Security group (inbound):** TCP `22` (SSH, your IP only), `80` and `443`
   (open to the world — needed for TLS + candidate access).
 
