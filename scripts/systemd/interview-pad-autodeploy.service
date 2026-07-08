@@ -1,0 +1,8 @@
+[Unit]
+Description=InterviewPad pull-based deploy (redeploy when origin/main moves)
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/interview-pad/scripts/autodeploy.sh
