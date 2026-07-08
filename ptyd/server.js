@@ -131,7 +131,9 @@ function startRun(id, s, lang, code) {
     "-w", "/code",
     "--tmpfs", "/tmp:size=128m,exec,mode=1777",
     "-e", "HOME=/tmp",
-    "-e", "GOCACHE=/tmp/.gocache",
+    // Persist Go's build cache in the per-pad volume so repeat runs reuse the
+    // compiled stdlib instead of rebuilding it (~6.7s cold -> ~1s warm).
+    "-e", "GOCACHE=/code/.gocache",
     "-e", "GOFLAGS=-mod=mod",
     "-e", "PYTHONDONTWRITEBYTECODE=1",
     spec.image, ...runCmd,
