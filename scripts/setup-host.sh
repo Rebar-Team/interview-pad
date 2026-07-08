@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 #
-# One-shot EC2 (Ubuntu 22.04 x86_64) setup for InterviewPad.
+# One-shot EC2 (Ubuntu 22.04 x86_64) setup for RebarPad. Run with sudo:
 #
-#   ./scripts/setup-host.sh <DOMAIN> [ACME_EMAIL]
+#   sudo ./scripts/setup-host.sh <DOMAIN> [ACME_EMAIL]
 #
-# Run it once. If the host is still on cgroup v2 (Ubuntu default) it switches to
-# v1 — which Judge0 requires — and reboots. Re-run the same command after the
-# reboot and it will finish: install Docker, generate secrets, and start the
-# stack. Idempotent: safe to run repeatedly.
+# Installs Docker, writes .env, pulls language runtimes, installs the boot +
+# auto-deploy systemd units, and starts the stack. Idempotent.
 set -euo pipefail
 
 DOMAIN="${1:-}"
@@ -20,30 +18,16 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-# --- 1. cgroup v1 (required by Judge0's isolate) -----------------------------
-if [[ "$(stat -fc %T /sys/fs/cgroup/ 2>/dev/null)" == "cgroup2fs" ]]; then
-  echo "==> Host is on cgroup v2; switching to v1 for Judge0..."
-  sudo sed -i 's/GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 systemd.unified_cgroup_hierarchy=0"/' /etc/default/grub
-  sudo update-grub
-  echo
-  echo "==> Rebooting to apply cgroup v1. After it comes back, re-run:"
-  echo "    ./scripts/setup-host.sh \"$DOMAIN\" \"$ACME_EMAIL\""
-  sudo reboot
-  exit 0
-fi
-echo "==> cgroup v1 active."
-
-# --- 2. Docker ---------------------------------------------------------------
+# --- 1. Docker (official script: reliable compose plugin across distros) -----
 if ! command -v docker >/dev/null 2>&1; then
   echo "==> Installing Docker..."
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq docker.io docker-compose-v2 git
-  sudo usermod -aG docker "$USER" || true
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq && apt-get install -y -qq git ca-certificates curl
+  curl -fsSL https://get.docker.com | sh
+  systemctl enable --now docker
 fi
-# Use sudo for docker if the current shell isn't in the docker group yet.
-DOCKER="docker"; docker info >/dev/null 2>&1 || DOCKER="sudo docker"
 
-# --- 3. Config + secrets -----------------------------------------------------
+# --- 2. Config ---------------------------------------------------------------
 if [[ ! -f .env ]]; then
   [[ -n "$DOMAIN" ]] || { echo "First run needs: setup-host.sh <DOMAIN> [ACME_EMAIL]" >&2; exit 1; }
   cp .env.example .env
@@ -52,15 +36,38 @@ if [[ ! -f .env ]]; then
   echo "==> Wrote .env (DOMAIN=${DOMAIN})."
 fi
 
-# --- 4. Language runtimes ----------------------------------------------------
+# --- 3. Language runtimes ----------------------------------------------------
 echo "==> Preparing language runtimes (pull images + build TypeScript runtime)..."
 ./scripts/prepare-runtimes.sh
 
+# --- 4. systemd: bring the stack up on boot + pull-based CD ------------------
+echo "==> Installing systemd units..."
+cat >/etc/systemd/system/interview-pad.service <<UNIT
+[Unit]
+Description=RebarPad stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${REPO_DIR}
+ExecStart=/usr/bin/docker compose up -d
+[Install]
+WantedBy=multi-user.target
+UNIT
+cp scripts/systemd/interview-pad-autodeploy.service /etc/systemd/system/
+cp scripts/systemd/interview-pad-autodeploy.timer /etc/systemd/system/
+git config --global --add safe.directory "${REPO_DIR}" || true
+systemctl daemon-reload
+systemctl enable interview-pad.service
+systemctl enable --now interview-pad-autodeploy.timer
+
 # --- 5. Bring up -------------------------------------------------------------
 echo "==> Building and starting the stack..."
-$DOCKER compose up -d --build
+docker compose up -d --build
 
 echo
-echo "==> Up. Point a Cloudflare A record (grey cloud) at this box's IP for \"$DOMAIN\","
-echo "    then open https://$DOMAIN  (first request provisions the TLS cert)."
-echo "    Verify end-to-end with: ./scripts/smoke-test.sh $DOMAIN"
+echo "==> Up. Point a Cloudflare A record (grey cloud) at this box's Elastic IP"
+echo "    for \"$DOMAIN\", then open https://$DOMAIN (first request provisions TLS)."
+echo "    CD is live: pushes to origin/main auto-deploy within ~60s."
