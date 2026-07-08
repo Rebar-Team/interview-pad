@@ -27,21 +27,35 @@ const SESSIONS_DIR = process.env.SESSIONS_DIR || "/sessions";
 const IDLE_KILL_MS = 90_000; // kill the shell this long after the last client leaves
 const SCROLLBACK_BYTES = 256 * 1024;
 
-// Invisible OSC marker printed after a run command completes; xterm ignores
-// unknown OSC sequences, so it never shows, but ptyd detects it to know the
-// program finished (drives the Run button's "Running" state).
+// Invisible OSC marker emitted by the shell's prompt hook whenever it returns
+// to a prompt. xterm ignores unknown OSC sequences, so it never shows; ptyd
+// detects it to know a run finished (drives the Run button's "Running" state).
 const DONE_MARKER = "\x1b]777;ipdone\x07";
-const DONE_PRINTF = "; printf '\\033]777;ipdone\\007'\r";
 
-// language id (Monaco) -> shell image + how to run a file in it.
-// `debian`/`alpine` decides which shell binary the container has.
+// Shell configs. The marker lives in the prompt so injected run commands stay
+// clean (no trailing `; printf ...`). bash uses an rcfile; busybox sh (alpine)
+// uses the $ENV file. Both are written into the pad's /code volume at startup.
+const SHELLS = {
+  bash: {
+    rcName: ".ptyd_rc",
+    rc: `PS1='$ '\nPROMPT_COMMAND='printf "\\033]777;ipdone\\007"'\n`,
+    argv: ["bash", "--rcfile", "/code/.ptyd_rc"],
+  },
+  sh: {
+    rcName: ".ptyd_env",
+    rc: "PS1='\x1b]777;ipdone\x07$ '\n",
+    argv: ["sh"],
+  },
+};
+
+// language id (Monaco) -> shell image, which shell it has, and how to run a file.
 const LANGS = {
-  python: { image: "python:3.12-slim", shell: ["bash", "--norc"], file: "main.py", cmd: (f) => `python3 -u /code/${f}` },
-  javascript: { image: "node:22-alpine", shell: ["sh"], file: "main.js", cmd: (f) => `node /code/${f}` },
-  typescript: { image: "interview-pad-ts:local", shell: ["bash", "--norc"], file: "main.ts", cmd: (f) => `tsx /code/${f}` },
+  python: { image: "python:3.12-slim", shell: "bash", file: "main.py", cmd: (f) => `python3 -u /code/${f}` },
+  javascript: { image: "node:22-alpine", shell: "sh", file: "main.js", cmd: (f) => `node /code/${f}` },
+  typescript: { image: "interview-pad-ts:local", shell: "bash", file: "main.ts", cmd: (f) => `tsx /code/${f}` },
   java: {
     image: "eclipse-temurin:21-jdk",
-    shell: ["bash", "--norc"],
+    shell: "bash",
     // File name must match the public class, so derive both from the code.
     resolve: (code) => {
       const m =
@@ -51,9 +65,9 @@ const LANGS = {
       return { file: `${cls}.java`, cmd: `cd /code && javac ${cls}.java -d /tmp && java -cp /tmp ${cls}` };
     },
   },
-  go: { image: "golang:1.22-alpine", shell: ["sh"], file: "main.go", cmd: () => `cd /code && go run main.go` },
-  c: { image: "gcc:14", shell: ["bash", "--norc"], file: "main.c", cmd: (f) => `gcc /code/${f} -o /tmp/a && /tmp/a` },
-  cpp: { image: "gcc:14", shell: ["bash", "--norc"], file: "main.cpp", cmd: (f) => `g++ -O2 /code/${f} -o /tmp/a && /tmp/a` },
+  go: { image: "golang:1.22-alpine", shell: "sh", file: "main.go", cmd: () => `cd /code && go run main.go` },
+  c: { image: "gcc:14", shell: "bash", file: "main.c", cmd: (f) => `gcc /code/${f} -o /tmp/a && /tmp/a` },
+  cpp: { image: "gcc:14", shell: "bash", file: "main.cpp", cmd: (f) => `g++ -O2 /code/${f} -o /tmp/a && /tmp/a` },
 };
 
 const sessions = new Map();
@@ -66,7 +80,7 @@ function sanitizeId(raw) {
 function getSession(id) {
   let s = sessions.get(id);
   if (!s) {
-    s = { clients: new Set(), pty: null, container: null, lang: null, buffer: "", tail: "", startedAt: 0, idleTimer: null, cols: 80, rows: 24 };
+    s = { clients: new Set(), pty: null, container: null, lang: null, buffer: "", tail: "", idleTimer: null, cols: 80, rows: 24 };
     sessions.set(id, s);
   }
   return s;
@@ -84,6 +98,13 @@ function appendBuffer(s, data) {
   if (s.buffer.length > SCROLLBACK_BYTES) s.buffer = s.buffer.slice(-SCROLLBACK_BYTES);
 }
 
+function sessionDir(id) {
+  const dir = path.join(SESSIONS_DIR, id);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+  try { fs.chmodSync(dir, 0o777); } catch {}
+  return dir;
+}
+
 function stopShell(s) {
   const container = s.container;
   if (s.pty) { try { s.pty.kill(); } catch {} s.pty = null; }
@@ -94,15 +115,14 @@ function stopShell(s) {
 
 let counter = 0;
 
-// Start (or restart) the pad's shell container for a language.
 function startShell(id, s, lang) {
   const spec = LANGS[lang];
   if (!spec) return;
   stopShell(s);
 
-  const dir = path.join(SESSIONS_DIR, id);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
-  try { fs.chmodSync(dir, 0o777); } catch {}
+  const dir = sessionDir(id);
+  const shell = SHELLS[spec.shell];
+  fs.writeFileSync(path.join(dir, shell.rcName), shell.rc, { mode: 0o666 });
 
   const container = `pad_${id}_${++counter}`;
   const args = [
@@ -122,24 +142,22 @@ function startShell(id, s, lang) {
     "-e", "GOCACHE=/code/.gocache",
     "-e", "GOFLAGS=-mod=mod",
     "-e", "PYTHONDONTWRITEBYTECODE=1",
-    "-e", "PS1=$ ",
     "-e", "TERM=xterm-256color",
-    spec.image, ...spec.shell,
   ];
+  if (spec.shell === "sh") args.push("-e", "ENV=/code/.ptyd_env");
+  args.push(spec.image, ...shell.argv);
 
   const term = pty.spawn("docker", args, { name: "xterm-256color", cols: s.cols, rows: s.rows, env: process.env });
   s.pty = term;
   s.container = container;
   s.lang = lang;
   s.tail = "";
-  s.startedAt = Date.now();
 
   term.onData((data) => {
     appendBuffer(s, data);
     broadcast(s, { t: "out", d: data });
-    // Detect the invisible run-complete marker (may span chunks). Check the
-    // full combined buffer before truncating so a marker followed by more data
-    // in the same chunk isn't missed.
+    // Detect the invisible prompt marker (may span chunks). Check the full
+    // combined buffer before truncating so a marker isn't missed mid-chunk.
     const combined = s.tail + data;
     if (combined.includes(DONE_MARKER)) broadcast(s, { t: "exit" });
     s.tail = combined.slice(-(DONE_MARKER.length - 1));
@@ -161,16 +179,14 @@ function runCode(id, s, lang, code) {
     return;
   }
   const resolved = spec.resolve ? spec.resolve(code) : { file: spec.file, cmd: spec.cmd(spec.file) };
-  const dir = path.join(SESSIONS_DIR, id);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
-  try { fs.chmodSync(dir, 0o777); } catch {}
+  const dir = sessionDir(id);
   fs.writeFileSync(path.join(dir, resolved.file), code, { mode: 0o666 });
 
   const fresh = !s.pty || s.lang !== lang;
   ensureShell(id, s, lang);
 
-  // Ctrl-U clears any partial input, then run + the completion marker.
-  const inject = "\x15" + resolved.cmd + DONE_PRINTF;
+  // Ctrl-U clears any partial input, then the clean run command.
+  const inject = "\x15" + resolved.cmd + "\r";
   // A freshly started shell needs a moment before it reads stdin.
   if (fresh) setTimeout(() => { if (s.pty) s.pty.write(inject); }, 900);
   else s.pty.write(inject);
