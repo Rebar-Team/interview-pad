@@ -14,7 +14,9 @@ WORKDIR /home/rust/src
 RUN apk --no-cache add curl musl-dev
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 COPY . .
-RUN wasm-pack build rustpad-wasm
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=rustpad-cargo-reg \
+    --mount=type=cache,target=/home/rust/src/target,id=rustpad-wasm-target \
+    wasm-pack build rustpad-wasm
 
 FROM --platform=amd64 node:lts-alpine AS frontend
 WORKDIR /usr/src/app

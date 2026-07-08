@@ -1,0 +1,65 @@
+name: CD setup (one-time)
+
+# Run once (Actions tab -> "CD setup" -> Run workflow). Creates an SSM instance
+# profile, attaches it to the box, and waits for the box to register with SSM so
+# the Deploy workflow can reach it via Send-Command. Idempotent.
+
+on:
+  workflow_dispatch:
+
+env:
+  INSTANCE_ID: i-0b39e6eeddf7347e2
+  ROLE: interview-pad-ssm
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - name: Ensure SSM role + instance profile
+        run: |
+          set -e
+          aws iam get-role --role-name "$ROLE" >/dev/null 2>&1 || \
+            aws iam create-role --role-name "$ROLE" \
+              --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+          aws iam attach-role-policy --role-name "$ROLE" \
+            --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1 || \
+            aws iam create-instance-profile --instance-profile-name "$ROLE"
+          aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" 2>/dev/null || true
+          sleep 10  # let the instance profile propagate
+
+      - name: Attach profile to the box
+        run: |
+          set -e
+          assoc=$(aws ec2 describe-iam-instance-profile-associations \
+            --filters Name=instance-id,Values=$INSTANCE_ID \
+            --query 'IamInstanceProfileAssociations[?State==`associated`].AssociationId' --output text)
+          if [ -z "$assoc" ]; then
+            aws ec2 associate-iam-instance-profile --instance-id $INSTANCE_ID \
+              --iam-instance-profile Name=$ROLE
+            echo "attached instance profile"
+          else
+            echo "instance profile already attached"
+          fi
+
+      - name: Wait for SSM registration
+        run: |
+          for i in $(seq 1 36); do
+            ping=$(aws ssm describe-instance-information \
+              --filters Key=InstanceIds,Values=$INSTANCE_ID \
+              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            echo "attempt $i: PingStatus=$ping"
+            [ "$ping" = "Online" ] && { echo "SSM registered ✅"; exit 0; }
+            sleep 10
+          done
+          echo "Instance did not register with SSM in time" >&2
+          exit 1
