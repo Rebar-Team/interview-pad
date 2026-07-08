@@ -123,6 +123,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
     });
     const f = new FitAddon();
     t.loadAddon(f);
+    // Swallow ptyd's invisible run-complete marker (OSC 777) so it never renders.
+    t.parser.registerOscHandler(777, () => true);
     t.open(boxRef.current);
     f.fit();
     term.current = t;
