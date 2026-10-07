@@ -6,6 +6,8 @@ import type {
 } from "monaco-editor/esm/vs/editor/editor.api";
 import { OpSeq } from "rustpad-wasm";
 
+import CursorLabels, { type CursorLabel } from "./CursorLabels";
+
 /** Options passed in to the Rustpad constructor. */
 export type RustpadOptions = {
   readonly uri: string;
@@ -30,6 +32,7 @@ class Rustpad {
   private connecting?: boolean;
   private recentFailures: number = 0;
   private readonly model: editor.ITextModel;
+  private readonly cursorLabels: CursorLabels;
   private readonly onChangeHandle: IDisposable;
   private readonly onCursorHandle: IDisposable;
   private readonly onSelectionHandle: IDisposable;
@@ -54,6 +57,17 @@ class Rustpad {
 
   constructor(readonly options: RustpadOptions) {
     this.model = options.editor.getModel()!;
+    this.cursorLabels = new CursorLabels(options.editor);
+    const selections = options.editor.getSelections() ?? [];
+    this.cursorData = {
+      cursors: selections.map((s) =>
+        unicodeOffset(this.model, s.getPosition()),
+      ),
+      selections: selections.map((s) => [
+        unicodeOffset(this.model, s.getStartPosition()),
+        unicodeOffset(this.model, s.getEndPosition()),
+      ]),
+    };
     this.onChangeHandle = options.editor.onDidChangeModelContent((e) =>
       this.onChange(e),
     );
@@ -92,6 +106,8 @@ class Rustpad {
     this.onSelectionHandle.dispose();
     this.onCursorHandle.dispose();
     this.onChangeHandle.dispose();
+    this.cursorLabels.dispose();
+    this.oldDecorations = this.model.deltaDecorations(this.oldDecorations, []);
     window.removeEventListener("beforeunload", this.beforeUnload);
     this.ws?.close();
   }
@@ -128,6 +144,8 @@ class Rustpad {
       this.ws = ws;
       this.options.onConnected?.();
       this.users = {};
+      this.userCursors = {};
+      this.updateCursors();
       this.options.onChangeUsers?.(this.users);
       this.sendInfo();
       this.sendCursorData();
@@ -138,6 +156,10 @@ class Rustpad {
     ws.onclose = () => {
       if (this.ws) {
         this.ws = undefined;
+        this.users = {};
+        this.userCursors = {};
+        this.updateCursors();
+        this.options.onChangeUsers?.(this.users);
         this.options.onDisconnected?.();
         if (++this.recentFailures >= 5) {
           // If we disconnect 5 times within 15 reconnection intervals, then the
@@ -209,6 +231,9 @@ class Rustpad {
     this.buffer = undefined;
     if (this.outstanding) {
       this.sendOperation(this.outstanding);
+    } else {
+      // The last debounced cursor update may have been skipped while buffered.
+      this.sendCursorData();
     }
   }
 
@@ -329,14 +354,17 @@ class Rustpad {
 
   private updateCursors() {
     const decorations: editor.IModelDeltaDecoration[] = [];
+    const labels: CursorLabel[] = [];
 
     for (const [id, data] of Object.entries(this.userCursors)) {
       if (id in this.users) {
         const { hue, name } = this.users[id as any];
         generateCssStyles(hue);
 
-        for (const cursor of data.cursors) {
+        for (let index = 0; index < data.cursors.length; index++) {
+          const cursor = data.cursors[index];
           const position = unicodePosition(this.model, cursor);
+          labels.push({ id: `${id}:${index}`, name, hue, position });
           decorations.push({
             options: {
               className: `remote-cursor-${hue}`,
@@ -378,6 +406,7 @@ class Rustpad {
       this.oldDecorations,
       decorations,
     );
+    this.cursorLabels.update(labels);
   }
 
   private onChange(event: editor.IModelContentChangedEvent) {
@@ -494,7 +523,7 @@ function generateCssStyles(hue: number) {
         background-color: hsla(${hue}, 90%, 80%, 0.5);
       }
       .monaco-editor .remote-cursor-${hue} {
-        border-left: 2px solid hsl(${hue}, 90%, 25%);
+        border-left: 2px solid hsl(${hue}, 90%, 60%);
       }
     `;
     const element = document.createElement("style");
