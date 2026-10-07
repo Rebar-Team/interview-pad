@@ -43,7 +43,7 @@ async function text(page: Page) {
   return page.evaluate(() => window.pad.editor.getValue());
 }
 
-async function expectSeparated(page: Page, count: number) {
+async function expectLabelsInViewport(page: Page, count: number) {
   const labels = page.locator(".remote-cursor-label");
   await expect(labels).toHaveCount(count);
   await expect
@@ -51,34 +51,59 @@ async function expectSeparated(page: Page, count: number) {
       labels.evaluateAll((nodes) => {
         const rects = nodes.map((node) => node.getBoundingClientRect());
         return rects.every(
-          (rect, i) =>
+          (rect) =>
             rect.left >= 0 &&
             rect.top >= 0 &&
             rect.right <= innerWidth &&
-            rect.bottom <= innerHeight &&
-            rects
-              .slice(i + 1)
-              .every(
-                (other) =>
-                  rect.right <= other.left ||
-                  rect.left >= other.right ||
-                  rect.bottom <= other.top ||
-                  rect.top >= other.bottom,
-              ),
+            rect.bottom <= innerHeight,
         );
       }),
     )
     .toBe(true);
 }
 
-test("coincident and nearby cursors keep readable names without blocking editing", async ({
+async function expectLeadingLabel(page: Page, ahead: string, behind: string) {
+  await expect
+    .poll(() =>
+      page.locator(".remote-cursor-labels").evaluate(
+        (layer, { ahead, behind }) => {
+          const labels = Array.from(
+            layer.querySelectorAll<HTMLElement>(".remote-cursor-label"),
+          );
+          const front = labels.find((label) => label.textContent === ahead)!;
+          const back = labels.find((label) => label.textContent === behind)!;
+          const a = front.getBoundingClientRect();
+          const b = back.getBoundingClientRect();
+          const left = Math.max(a.left, b.left);
+          const right = Math.min(a.right, b.right);
+          if (a.top !== b.top || right <= left) return false;
+          // Temporarily enable hit testing to inspect the actual paint order.
+          (layer as HTMLElement).style.pointerEvents = "auto";
+          try {
+            return (
+              document.elementFromPoint(
+                (left + right) / 2,
+                a.top + a.height / 2,
+              ) === front
+            );
+          } finally {
+            (layer as HTMLElement).style.removeProperty("pointer-events");
+          }
+        },
+        { ahead, behind },
+      ),
+    )
+    .toBe(true);
+}
+
+test("coincident cursors stack and nearby cursors overlap with the leading cursor on top", async ({
   browser,
 }, testInfo) => {
   const pad = `overlap-${testInfo.testId}`;
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(browser, pad, "Alex", 200);
   const candidate = await join(browser, pad, "Candidate", 30);
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await observer.evaluate(() =>
     window.pad.editor.setValue(
       "function interview() {\n  return 'hello';\n}\n",
@@ -87,7 +112,7 @@ test("coincident and nearby cursors keep readable names without blocking editing
   await expect.poll(() => text(alex)).toContain("hello");
   await expect.poll(() => text(candidate)).toContain("hello");
   for (const page of [observer, alex, candidate]) await position(page, 2, 5);
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await expect(
     observer.locator(".remote-cursor-label").first(),
   ).toHaveAttribute("aria-label", /line 2, column 5/);
@@ -99,7 +124,16 @@ test("coincident and nearby cursors keep readable names without blocking editing
       exact: true,
     }),
   ).toBeVisible();
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
+  await expectLeadingLabel(observer, "Candidate", "Alex");
+  await position(alex, 2, 7);
+  await expect(
+    observer.getByRole("listitem", {
+      name: "Alex, line 2, column 7",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expectLeadingLabel(observer, "Alex", "Candidate");
   // The overlay must not consume clicks intended for the source underneath it.
   expect(
     await observer
@@ -152,7 +186,7 @@ test("single and stacked cursor labels show first names", async ({
       exact: true,
     }),
   ).toHaveText("Alex");
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   await observer.screenshot({ path: testInfo.outputPath("single-label.png") });
   const sam = await join(browser, pad, "Sam Rivera", 30);
   await expect.poll(() => text(sam)).toContain("return []");
@@ -163,7 +197,7 @@ test("single and stacked cursor labels show first names", async ({
       exact: true,
     }),
   ).toHaveText("Sam");
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await expect(observer.locator(".remote-cursor-label-group")).toHaveCount(1);
   const [first, second] = await observer
     .locator(".remote-cursor-label")
@@ -179,6 +213,17 @@ test("single and stacked cursor labels show first names", async ({
   await observer.screenshot({
     path: testInfo.outputPath("stacked-labels.png"),
   });
+  await position(sam, 10, 22);
+  await expect(
+    observer.getByRole("listitem", {
+      name: "Sam Rivera, line 10, column 22",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expectLeadingLabel(observer, "Sam", "Alex");
+  await observer.screenshot({
+    path: testInfo.outputPath("one-character-apart.png"),
+  });
   await observer.evaluate(async () => {
     window.pad.editor.setPosition({ lineNumber: 1, column: 1 });
     await window.pad.editor.getAction("editor.fold")!.run();
@@ -187,7 +232,7 @@ test("single and stacked cursor labels show first names", async ({
   await observer.evaluate(() =>
     window.pad.editor.getAction("editor.unfoldAll")!.run(),
   );
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await Promise.all([observer.close(), alex.close(), sam.close()]);
 });
 
@@ -205,12 +250,12 @@ test("disconnect clears presence and reconnect rebuilds labels without ghosts", 
   );
   await observer.waitForFunction(() => window.pad?.state.connected);
   const alex = await join(browser, pad, "Alex Green");
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   // The server rejects an unknown message and closes the real connection.
   server!.send(JSON.stringify({ Invalid: "disconnect for reconnect test" }));
   await expect(observer.locator(".remote-cursor-label")).toHaveCount(0);
   await expect(observer.locator(".remote-cursor-label")).toHaveText(["Alex"]);
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   await Promise.all([observer.close(), alex.close()]);
 });
 
@@ -238,7 +283,7 @@ test("renames are plain text, multi-cursors have labels, and departures remove t
       })),
     );
   });
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await expect(observer.locator(".remote-cursor-label").first()).toHaveText(
     "<img/src=x/onerror=alert(1)>",
   );
@@ -270,21 +315,21 @@ test("labels follow scrolling, wrapping, resize, and theme changes at viewport e
   );
   await expect.poll(() => text(alex)).toContain("59:");
   await position(alex, 1, 95);
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   await observer.evaluate(() => window.pad.editor.setScrollTop(600));
   await expect(observer.locator(".remote-cursor-label")).toHaveCount(0);
   await observer.evaluate(() => {
     window.pad.editor.setScrollTop(0);
     window.pad.editor.setScrollLeft(500);
   });
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   await observer.setViewportSize({ width: 360, height: 300 });
   await observer.evaluate(() => {
     window.pad.setTheme("vs");
     window.pad.editor.updateOptions({ wordWrap: "on" });
     window.pad.editor.setScrollLeft(0);
   });
-  await expectSeparated(observer, 1);
+  await expectLabelsInViewport(observer, 1);
   await observer.screenshot({
     path: testInfo.outputPath("wrapped-cursor.png"),
   });
@@ -298,7 +343,7 @@ test("simultaneous buffered typing at the same position converges and publishes 
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(browser, pad, "Alex", 200, 100);
   const candidate = await join(browser, pad, "Candidate", 30, 100);
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await Promise.all(
     (
       [
@@ -339,6 +384,6 @@ test("simultaneous buffered typing at the same position converges and publishes 
       })
       .toBe(1);
   }
-  await expectSeparated(observer, 2);
+  await expectLabelsInViewport(observer, 2);
   await Promise.all([observer.close(), alex.close(), candidate.close()]);
 });

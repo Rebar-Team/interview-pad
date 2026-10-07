@@ -13,17 +13,6 @@ export type CursorLabel = {
   readonly position: IPosition;
 };
 
-type Rect = { left: number; top: number; width: number; height: number };
-
-function overlaps(a: Rect, b: Rect) {
-  return (
-    a.left < b.left + b.width + 2 &&
-    a.left + a.width + 2 > b.left &&
-    a.top < b.top + b.height + 2 &&
-    a.top + a.height + 2 > b.top
-  );
-}
-
 /** Names use a separate, non-interactive layer so they never move the text/carets. */
 export default class CursorLabels implements editor.IOverlayWidget {
   private readonly node = document.createElement("div");
@@ -42,7 +31,6 @@ export default class CursorLabels implements editor.IOverlayWidget {
       editor.onDidChangeHiddenAreas(() => this.scheduleLayout()),
       editor.onDidLayoutChange(() => this.scheduleLayout()),
       editor.onDidChangeConfiguration(() => this.scheduleLayout()),
-      editor.onDidChangeCursorPosition(() => this.scheduleLayout()),
     ];
   }
 
@@ -106,31 +94,26 @@ export default class CursorLabels implements editor.IOverlayWidget {
       return [{ cursor, anchor }];
     });
 
-    // Reserve every caret, including our own, before placing any labels.
-    const occupied: Rect[] = visible.map(({ anchor }) => ({
-      ...anchor,
-      width: 2,
-    }));
-    for (const selection of this.editor.getSelections() ?? []) {
-      const anchor = this.editor.getScrolledVisiblePosition(
-        selection.getPosition(),
-      );
-      if (anchor) occupied.push({ ...anchor, width: 2 });
-    }
-
     const groups = new Map<string, typeof visible>();
     for (const entry of visible) {
-      const key = `${entry.anchor.left}:${entry.anchor.top}`;
+      const key = `${entry.cursor.position.lineNumber}:${entry.cursor.position.column}`;
       const group = groups.get(key) ?? [];
       group.push(entry);
       groups.set(key, group);
     }
 
-    // Coincident cursors travel as one stack, in stable user/cursor order.
-    for (const group of Array.from(groups.values())) {
+    // Only identical document positions stack. Later positions paint on top.
+    const orderedGroups = Array.from(groups.values()).sort(
+      (a, b) =>
+        a[0].cursor.position.lineNumber - b[0].cursor.position.lineNumber ||
+        a[0].cursor.position.column - b[0].cursor.position.column,
+    );
+    for (let index = 0; index < orderedGroups.length; index++) {
+      const group = orderedGroups[index];
       const { anchor } = group[0];
       const label = document.createElement("div");
       label.className = "remote-cursor-label-group";
+      label.style.zIndex = String(index + 1);
       label.setAttribute("role", "presentation");
       for (const { cursor } of group) {
         const name = document.createElement("div");
@@ -152,30 +135,14 @@ export default class CursorLabels implements editor.IOverlayWidget {
       const height = label.offsetHeight;
       const left = Math.max(leftEdge, Math.min(anchor.left, rightEdge - width));
       const preferredTop = anchor.top - height - 2;
-      const candidates = [
-        preferredTop,
-        anchor.top + anchor.height + 2,
-        ...occupied.flatMap((rect) => [
-          rect.top - height - 2,
-          rect.top + rect.height + 2,
-        ]),
-      ].sort((a, b) => Math.abs(a - preferredTop) - Math.abs(b - preferredTop));
-      const top = candidates.find(
-        (top) =>
-          top >= 0 &&
-          top + height <= bottomEdge &&
-          !occupied.some((rect) =>
-            overlaps({ left, top, width, height }, rect),
-          ),
-      );
-      // A packed viewport can run out of space; never cover another name/caret.
-      if (top === undefined) {
+      const top =
+        preferredTop >= 0 ? preferredTop : anchor.top + anchor.height + 2;
+      if (top + height > bottomEdge) {
         label.remove();
         continue;
       }
       label.style.left = `${left}px`;
       label.style.top = `${top}px`;
-      occupied.push({ left, top, width, height });
 
       const stem = document.createElement("div");
       stem.className = "remote-cursor-label-stem";
