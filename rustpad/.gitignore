@@ -7,3 +7,6 @@ dist
 *.local
 
 .vscode
+
+/test-results
+/playwright-report
