@@ -16,10 +16,11 @@ pub mod common;
 async fn test_single_operation() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
-    expect_text(&filter, "foobar", "").await;
+    expect_text(&filter, &id, "").await;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
@@ -47,7 +48,7 @@ async fn test_single_operation() -> Result<()> {
         })
     );
 
-    expect_text(&filter, "foobar", "hello").await;
+    expect_text(&filter, &id, "hello").await;
     Ok(())
 }
 
@@ -55,10 +56,11 @@ async fn test_single_operation() -> Result<()> {
 async fn test_invalid_operation() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
-    expect_text(&filter, "foobar", "").await;
+    expect_text(&filter, &id, "").await;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
@@ -81,9 +83,10 @@ async fn test_invalid_operation() -> Result<()> {
 async fn test_concurrent_transform() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
     // Connect the first client
-    let mut client = connect(&filter, "foobar").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
@@ -139,10 +142,10 @@ async fn test_concurrent_transform() -> Result<()> {
             }
         })
     );
-    expect_text(&filter, "foobar", "henlo").await;
+    expect_text(&filter, &id, "henlo").await;
 
     // Connect the second client
-    let mut client2 = connect(&filter, "foobar").await?;
+    let mut client2 = connect(&filter, &id).await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
 
@@ -192,7 +195,7 @@ async fn test_concurrent_transform() -> Result<()> {
     let msg = client2.recv().await?;
     assert_eq!(msg, transformed_op);
 
-    expect_text(&filter, "foobar", "~rust~henlo").await;
+    expect_text(&filter, &id, "~rust~henlo").await;
     Ok(())
 }
 
@@ -200,8 +203,9 @@ async fn test_concurrent_transform() -> Result<()> {
 async fn test_set_language() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
@@ -211,7 +215,7 @@ async fn test_set_language() -> Result<()> {
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Language": "javascript" }));
 
-    let mut client2 = connect(&filter, "foobar").await?;
+    let mut client2 = connect(&filter, &id).await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
     let msg = client2.recv().await?;
@@ -225,6 +229,6 @@ async fn test_set_language() -> Result<()> {
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Language": "python" }));
 
-    expect_text(&filter, "foobar", "").await;
+    expect_text(&filter, &id, "").await;
     Ok(())
 }

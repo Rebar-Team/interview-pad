@@ -1,14 +1,10 @@
-import { Box, Flex, HStack, Icon, IconButton, Text } from "@chakra-ui/react";
-import {
-  forwardRef,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-} from "react";
-import { VscChevronDown, VscClearAll, VscDebugStop, VscTerminal } from "react-icons/vsc";
-import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { ChevronDown, Eraser, Square, SquareTerminal } from "lucide-react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+
+import { Button } from "./components/ui/button";
 
 // Monaco language ids that ptyd can execute (must match ptyd's LANGS).
 const RUNNABLE = new Set([
@@ -36,7 +32,7 @@ type TerminalProps = {
 };
 
 function ptyUri(id: string) {
-  const url = new URL(`pty/${id}`, window.location.href);
+  const url = new URL(`/pty/${id}`, window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
 }
@@ -49,7 +45,9 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
   const term = useRef<XTerm>();
   const fit = useRef<FitAddon>();
   const ws = useRef<WebSocket>();
-  const pending = useRef<object | null>(null); // a run queued until the socket opens
+  // Messages queued until the socket opens. A queue, not one slot: the first
+  // resize fires while connecting and must not overwrite a queued run.
+  const pending = useRef<object[]>([]);
   const runningCb = useRef(onRunningChange);
   runningCb.current = onRunningChange;
   const langRef = useRef(language);
@@ -57,7 +55,11 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
 
   // Send helper — opens/reopens the socket if needed and flushes a queued run.
   function connect() {
-    if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+    if (
+      ws.current &&
+      (ws.current.readyState === WebSocket.OPEN ||
+        ws.current.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
     const sock = new WebSocket(ptyUri(padId));
@@ -65,27 +67,50 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
     sock.onopen = () => {
       // Start (or attach to) the sandboxed shell for the current language so the
       // terminal is immediately typeable.
-      sock.send(JSON.stringify({ t: "shell", lang: langRef.current, cols: term.current?.cols, rows: term.current?.rows }));
-      if (pending.current) { sock.send(JSON.stringify(pending.current)); pending.current = null; }
+      sock.send(
+        JSON.stringify({
+          t: "shell",
+          lang: langRef.current,
+          cols: term.current?.cols,
+          rows: term.current?.rows,
+        }),
+      );
+      for (const msg of pending.current) sock.send(JSON.stringify(msg));
+      pending.current = [];
     };
     sock.onmessage = (ev) => {
       let m: { t: string; d?: string; code?: number };
-      try { m = JSON.parse(ev.data); } catch { return; }
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
       const t = term.current;
       if (!t) return;
       if (m.t === "out" || m.t === "info") t.write(m.d ?? "");
       else if (m.t === "exit") {
-        t.write(`\r\n\x1b[90m[process exited with code ${m.code}]\x1b[0m\r\n`);
+        // ptyd sends a bare exit whenever the shell is back at its prompt.
+        if (m.code !== undefined)
+          t.write(
+            `\r\n\x1b[90m[process exited with code ${m.code}]\x1b[0m\r\n`,
+          );
         runningCb.current?.(false);
       }
     };
-    sock.onclose = () => { if (ws.current === sock) ws.current = undefined; };
+    sock.onclose = () => {
+      if (ws.current === sock) ws.current = undefined;
+      runningCb.current?.(false);
+    };
   }
 
   function send(obj: object) {
     const sock = ws.current;
-    if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
-    else { pending.current = obj; connect(); }
+    if (sock && sock.readyState === WebSocket.OPEN)
+      sock.send(JSON.stringify(obj));
+    else {
+      pending.current.push(obj);
+      connect();
+    }
   }
 
   useImperativeHandle(ref, () => ({
@@ -147,6 +172,7 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
       ro.disconnect();
       dataSub.dispose();
       ws.current?.close();
+      runningCb.current?.(false);
       t.dispose();
       term.current = undefined;
     };
@@ -170,24 +196,47 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal(
     }
   }, [darkMode]);
 
-  const headerBg = darkMode ? "#252526" : "#f0f0f0";
-  const border = darkMode ? "#333333" : "#e2e2e2";
+  const background = darkMode ? "#1e1e1e" : "#ffffff";
 
   return (
-    <Flex direction="column" h="100%" borderTop="1px solid" borderColor={border} bgColor={darkMode ? "#1e1e1e" : "#ffffff"}>
-      <HStack h={7} px={2} flexShrink={0} bgColor={headerBg} color={darkMode ? "#cccccc" : "#383838"} justify="space-between">
-        <HStack spacing={1.5}>
-          <Icon as={VscTerminal} fontSize="sm" />
-          <Text fontSize="xs" fontWeight="medium">Terminal</Text>
-        </HStack>
-        <HStack spacing={0}>
-          <IconButton aria-label="Stop" title="Stop the running program" icon={<VscDebugStop />} size="xs" variant="ghost" onClick={stopRun} />
-          <IconButton aria-label="Clear" title="Clear terminal" icon={<VscClearAll />} size="xs" variant="ghost" onClick={clearTerminal} />
-          <IconButton aria-label="Collapse terminal" title="Hide terminal" icon={<VscChevronDown />} size="xs" variant="ghost" onClick={onClose} />
-        </HStack>
-      </HStack>
-      <Box ref={boxRef} flex={1} minH={0} px={1} py={1} />
-    </Flex>
+    <div className="flex h-full flex-col" style={{ background }}>
+      <div className="flex h-8 shrink-0 items-center justify-between border-b bg-muted/40 px-2 text-muted-foreground">
+        <div className="flex items-center gap-1.5">
+          <SquareTerminal className="size-3.5" />
+          <span className="text-xs font-medium">Terminal</span>
+        </div>
+        <div className="flex items-center">
+          <Button
+            aria-label="Stop"
+            title="Stop the running program"
+            size="icon-xs"
+            variant="ghost"
+            onClick={stopRun}
+          >
+            <Square />
+          </Button>
+          <Button
+            aria-label="Clear"
+            title="Clear terminal"
+            size="icon-xs"
+            variant="ghost"
+            onClick={clearTerminal}
+          >
+            <Eraser />
+          </Button>
+          <Button
+            aria-label="Collapse terminal"
+            title="Hide terminal"
+            size="icon-xs"
+            variant="ghost"
+            onClick={onClose}
+          >
+            <ChevronDown />
+          </Button>
+        </div>
+      </div>
+      <div ref={boxRef} className="min-h-0 flex-1 p-1" />
+    </div>
   );
 });
 

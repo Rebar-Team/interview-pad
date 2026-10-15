@@ -66,11 +66,13 @@ async fn test_persist() -> Result<()> {
     let filter = server(ServerConfig {
         expiry_days: 2,
         database: Some(Database::new(&temp_sqlite_uri()?).await?),
+        ..ServerConfig::default()
     });
+    let id = create_room(&filter).await;
 
-    expect_text(&filter, "persist", "").await;
+    expect_text(&filter, &id, "").await;
 
-    let mut client = connect(&filter, "persist").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
@@ -87,12 +89,12 @@ async fn test_persist() -> Result<()> {
     let msg = client.recv().await?;
     msg.get("History")
         .expect("should receive history operation");
-    expect_text(&filter, "persist", "hello").await;
+    expect_text(&filter, &id, "hello").await;
 
     let hour = Duration::from_secs(3600);
     time::pause();
     time::advance(47 * hour).await;
-    expect_text(&filter, "persist", "hello").await;
+    expect_text(&filter, &id, "hello").await;
 
     // Give SQLite some time to actually update the database.
     time::resume();
@@ -100,7 +102,7 @@ async fn test_persist() -> Result<()> {
     time::pause();
 
     time::advance(3 * hour).await;
-    expect_text(&filter, "persist", "hello").await;
+    expect_text(&filter, &id, "hello").await;
 
     Ok(())
 }

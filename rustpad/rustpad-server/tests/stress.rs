@@ -16,14 +16,15 @@ pub mod common;
 async fn test_lost_wakeups() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
-    expect_text(&filter, "stress", "").await;
+    expect_text(&filter, &id, "").await;
 
-    let mut client = connect(&filter, "stress").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 
-    let mut client2 = connect(&filter, "stress").await?;
+    let mut client2 = connect(&filter, &id).await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
 
@@ -66,7 +67,7 @@ async fn test_lost_wakeups() -> Result<()> {
         assert!(start.elapsed() <= Duration::from_millis(200));
     }
 
-    expect_text(&filter, "stress", &"a".repeat(revision as usize)).await;
+    expect_text(&filter, &id, &"a".repeat(revision as usize)).await;
 
     Ok(())
 }
@@ -75,10 +76,11 @@ async fn test_lost_wakeups() -> Result<()> {
 async fn test_large_document() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
 
-    expect_text(&filter, "stress", "").await;
+    expect_text(&filter, &id, "").await;
 
-    let mut client = connect(&filter, "stress").await?;
+    let mut client = connect(&filter, &id).await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
 

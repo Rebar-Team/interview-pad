@@ -1,0 +1,36 @@
+# Keep first-time local builds within a small VM's memory budget.
+FROM rust:alpine AS backend
+ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OPT_LEVEL=1
+WORKDIR /app
+RUN apk --no-cache add musl-dev openssl-dev
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=interview-local-registry \
+    --mount=type=cache,target=/app/target,id=interview-local-target \
+    cargo test --release -p rustpad-server --lib assistant && \
+    cargo build --release -p rustpad-server && cp target/release/rustpad-server /rustpad-server
+
+FROM --platform=linux/amd64 rust:alpine AS wasm
+ENV CARGO_BUILD_JOBS=2
+WORKDIR /app
+RUN apk --no-cache add curl musl-dev
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+COPY Cargo.toml Cargo.lock ./
+COPY rustpad-wasm rustpad-wasm
+COPY rustpad-server rustpad-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=interview-wasm-registry \
+    --mount=type=cache,target=/app/target,id=interview-wasm-target \
+    wasm-pack build rustpad-wasm --dev
+
+FROM --platform=linux/amd64 node:22-alpine AS frontend
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY --from=wasm /app/rustpad-wasm/pkg rustpad-wasm/pkg
+RUN --mount=type=cache,target=/root/.npm,id=interview-local-npm npm ci
+COPY . .
+RUN npm run check && npm run build
+
+FROM scratch
+COPY --from=frontend /app/dist dist
+COPY --from=backend /rustpad-server .
+USER 1000:1000
+CMD ["./rustpad-server"]

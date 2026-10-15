@@ -64,6 +64,35 @@ In the Cloudflare dashboard for the zone:
 
 Browse to `https://<DOMAIN>`; Caddy issues the cert on the first request (~30s).
 
+## 3b. Google sign-in
+
+Interviewers sign in with Google; candidates never do. Create the OAuth client
+once in a GCP project owned by the withrebar.ai organization:
+
+1. **APIs & Services -> OAuth consent screen:** user type **Internal**. Google
+   then refuses accounts outside the Workspace before they reach us.
+2. **Credentials -> Create OAuth client ID -> Web application**, with redirect URIs
+   `https://<DOMAIN>/auth/callback` and `http://127.0.0.1:3030/auth/callback`.
+3. Put the ID and secret in `/opt/interview-pad/.env` as `GOOGLE_CLIENT_ID` and
+   `GOOGLE_CLIENT_SECRET`, then `sudo bash scripts/deploy.sh`.
+
+The server also checks the ID token's `hd` claim and email domain against
+`GOOGLE_ALLOWED_DOMAIN`, so an External consent screen would still be safe.
+`SESSION_SECRET` (at least 32 characters) signs the 12-hour session cookie.
+`setup-host.sh` generates it on new boxes; on an existing box add it yourself:
+
+```bash
+echo "SESSION_SECRET=$(openssl rand -hex 32)" | sudo tee -a /opt/interview-pad/.env
+```
+
+Rotating it signs everyone out.
+
+**Set these before merging the sign-in change.** `scripts/deploy.sh` refuses to
+deploy while `SESSION_SECRET`, `GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is
+empty. On that deploy, existing pads become read-only (still readable at
+`/r/<id>`; old `/#<id>` links redirect) and only the dashboard creates rooms, so
+merge outside interview hours.
+
 ## 4. Continuous deployment
 
 `setup-host.sh` installs a systemd timer (`interview-pad-autodeploy.timer`) that
@@ -89,12 +118,17 @@ on boot; named volumes persist pads across restarts.
 
 ## 6. Operating it
 
-- **Run an interview:** open `https://<DOMAIN>`, enter your name, copy the invite
-  link from the toolbar, send it to the candidate. Anyone with the link joins and
-  edits live.
-- **Security model:** access is by unguessable pad URL — no accounts. Fine for
-  scheduled interviews; not long-term private storage.
+- **Run an interview:** open `https://<DOMAIN>`, sign in with your withrebar.ai
+  Google account, create a room (name it or keep the generated gamertag), and
+  send the candidate the room link. Anyone with the link joins and edits live.
+- **Read-only after 6 hours:** a room accepts edits, assistant requests and code
+  runs for 6 hours after creation (`ROOM_TTL_MINUTES`), then stays viewable
+  forever. Rustpad drops edits, the assistant refuses, and Caddy refuses the
+  terminal (`/api/pty-auth`); ptyd tears down a live shell when the window ends.
+- **Security model:** interviewers authenticate; candidates reach a room by its
+  unguessable 12-character URL. Unknown room URLs 404 instead of creating pads.
 - **Languages:** pick one in the toolbar; **Run** (or ⌘/Ctrl+Enter) executes it
   in the shared terminal. The terminal is a real shell you can also type into.
-- **Backups (optional):** the `rustpad-data` volume holds pad contents; snapshot
+- **Backups (optional):** the `rustpad-data` volume holds pad contents and the
+  room table (name, creator, lock time); snapshot
   the EBS volume if you need durability.

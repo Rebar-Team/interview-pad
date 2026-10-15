@@ -5,6 +5,8 @@ use std::str::FromStr;
 use anyhow::{bail, Result};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqlitePool};
 
+use crate::rooms::Room;
+
 /// Represents a document persisted in database storage.
 #[derive(sqlx::FromRow, PartialEq, Eq, Clone, Debug)]
 pub struct PersistedDocument {
@@ -69,6 +71,48 @@ ON CONFLICT(id) DO UPDATE SET
             );
         }
         Ok(())
+    }
+
+    /// Load a room by ID.
+    pub async fn load_room(&self, id: &str) -> Result<Option<Room>> {
+        sqlx::query_as(
+            r#"SELECT id, name, created_by, created_at, expires_at FROM room WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.into())
+    }
+
+    /// Insert a new room.
+    pub async fn store_room(&self, room: &Room) -> Result<()> {
+        sqlx::query(
+            r#"
+INSERT INTO
+    room (id, name, created_by, created_at, expires_at)
+VALUES
+    ($1, $2, $3, $4, $5)"#,
+        )
+        .bind(&room.id)
+        .bind(&room.name)
+        .bind(&room.created_by)
+        .bind(room.created_at)
+        .bind(room.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// List all rooms, newest first.
+    pub async fn list_rooms(&self) -> Result<Vec<Room>> {
+        sqlx::query_as(
+            // Pads migrated from before rooms existed have no creator; they stay
+            // reachable by link but don't belong on the dashboard.
+            r#"SELECT id, name, created_by, created_at, expires_at FROM room WHERE created_by != '' ORDER BY created_at DESC LIMIT 500"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.into())
     }
 
     /// Count the number of documents in the database.

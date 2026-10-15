@@ -35,6 +35,13 @@ if [[ ! -f .env ]]; then
   sed -i "s|^ACME_EMAIL=.*|ACME_EMAIL=${ACME_EMAIL}|" .env
   echo "==> Wrote .env (DOMAIN=${DOMAIN})."
 fi
+if ! grep -q '^SESSION_SECRET=.\+' .env; then
+  sed -i '/^SESSION_SECRET=/d' .env
+  [ -z "$(tail -c1 .env)" ] || echo >> .env
+  echo "SESSION_SECRET=$(openssl rand -hex 32)" >> .env
+  echo "==> Generated SESSION_SECRET."
+fi
+grep -q '^GOOGLE_CLIENT_ID=.\+' .env || echo "WARNING: set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET in .env; sign-in is disabled until then." >&2
 
 # --- 3. Language runtimes ----------------------------------------------------
 echo "==> Preparing language runtimes (pull images + build TypeScript runtime)..."

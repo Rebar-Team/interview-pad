@@ -6,6 +6,8 @@ import {
   test,
 } from "@playwright/test";
 
+import { createRoom } from "./rooms";
+
 async function join(
   browser: Browser,
   pad: string,
@@ -99,7 +101,7 @@ async function expectLeadingLabel(page: Page, ahead: string, behind: string) {
 test("coincident cursors stack and nearby cursors overlap with the leading cursor on top", async ({
   browser,
 }, testInfo) => {
-  const pad = `overlap-${testInfo.testId}`;
+  const pad = await createRoom("overlap");
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(browser, pad, "Alex", 200);
   const candidate = await join(browser, pad, "Candidate", 30);
@@ -157,7 +159,7 @@ test("coincident cursors stack and nearby cursors overlap with the leading curso
 test("single and stacked cursor labels show first names", async ({
   browser,
 }, testInfo) => {
-  const pad = `screenshots-${testInfo.testId}`;
+  const pad = await createRoom("screenshots");
   const observer = await join(browser, pad, "Miguel Nicolas");
   const alex = await join(browser, pad, "Alex Green", 200);
   await observer.evaluate(() =>
@@ -239,7 +241,7 @@ test("single and stacked cursor labels show first names", async ({
 test("disconnect clears presence and reconnect rebuilds labels without ghosts", async ({
   browser,
 }, testInfo) => {
-  const pad = `reconnect-${testInfo.testId}`;
+  const pad = await createRoom("reconnect");
   const observer = await browser.newPage();
   let server: WebSocketRoute;
   await observer.routeWebSocket("**/api/socket/**", (connection) => {
@@ -262,7 +264,7 @@ test("disconnect clears presence and reconnect rebuilds labels without ghosts", 
 test("renames are plain text, multi-cursors have labels, and departures remove them", async ({
   browser,
 }, testInfo) => {
-  const pad = `presence-${testInfo.testId}`;
+  const pad = await createRoom("presence");
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(browser, pad, "Alex");
   await observer.evaluate(() =>
@@ -298,7 +300,7 @@ test("renames are plain text, multi-cursors have labels, and departures remove t
 test("labels follow scrolling, wrapping, resize, and theme changes at viewport edges", async ({
   browser,
 }, testInfo) => {
-  const pad = `viewport-${testInfo.testId}`;
+  const pad = await createRoom("viewport");
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(
     browser,
@@ -339,7 +341,7 @@ test("labels follow scrolling, wrapping, resize, and theme changes at viewport e
 test("simultaneous buffered typing at the same position converges and publishes the final caret", async ({
   browser,
 }, testInfo) => {
-  const pad = `typing-${testInfo.testId}`;
+  const pad = await createRoom("typing");
   const observer = await join(browser, pad, "Miguel");
   const alex = await join(browser, pad, "Alex", 200, 100);
   const candidate = await join(browser, pad, "Candidate", 30, 100);

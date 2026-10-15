@@ -1,7 +1,7 @@
 //! Eventually consistent server-side logic for Rustpad.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use futures::prelude::*;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
 use warp::ws::{Message, WebSocket};
 
-use crate::{database::PersistedDocument, ot::transform_index};
+use crate::{database::PersistedDocument, ot::transform_index, rooms::now_ms};
 
 /// The main object representing a collaborative session.
 pub struct Rustpad {
@@ -26,6 +26,11 @@ pub struct Rustpad {
     update: broadcast::Sender<ServerMsg>,
     /// Set to true when the document is destroyed.
     killed: AtomicBool,
+    /// End of the writable window, in milliseconds since the Unix epoch.
+    expires_at: AtomicI64,
+    /// Latched once the room locks, so a wall clock stepping backwards can
+    /// never reopen it.
+    locked: AtomicBool,
 }
 
 /// Shared state involving multiple users, protected by a lock.
@@ -88,6 +93,13 @@ enum ServerMsg {
     UserInfo { id: u64, info: Option<UserInfo> },
     /// Broadcasts a user's cursor position.
     UserCursor { id: u64, data: CursorData },
+    /// Informs clients of the room's writable window, and when it closes.
+    /// `server_now` lets clients correct for their own clock skew.
+    Room {
+        expires_at: i64,
+        writable: bool,
+        server_now: i64,
+    },
 }
 
 impl From<ServerMsg> for Message {
@@ -106,6 +118,8 @@ impl Default for Rustpad {
             notify: Default::default(),
             update: tx,
             killed: AtomicBool::new(false),
+            expires_at: AtomicI64::new(i64::MAX),
+            locked: AtomicBool::new(false),
         }
     }
 }
@@ -172,6 +186,36 @@ impl Rustpad {
         self.notify.notify_waiters();
     }
 
+    /// Set the end of the writable window, in milliseconds since the Unix epoch.
+    pub fn set_expiry(&self, expires_at: i64) {
+        self.expires_at.store(expires_at, Ordering::Relaxed);
+    }
+
+    /// Whether edits are still accepted.
+    pub fn writable(&self) -> bool {
+        if self.locked.load(Ordering::Relaxed) {
+            return false;
+        }
+        if now_ms() < self.expires_at.load(Ordering::Relaxed) {
+            return true;
+        }
+        self.locked.store(true, Ordering::Relaxed);
+        false
+    }
+
+    /// Tell every client the room's current writable state.
+    pub fn announce_room(&self) {
+        self.update.send(self.room_msg()).ok();
+    }
+
+    fn room_msg(&self) -> ServerMsg {
+        ServerMsg::Room {
+            expires_at: self.expires_at.load(Ordering::Relaxed),
+            writable: self.writable(),
+            server_now: now_ms(),
+        }
+    }
+
     /// Returns if this Rustpad object has been killed.
     pub fn killed(&self) -> bool {
         self.killed.load(Ordering::Relaxed)
@@ -215,7 +259,7 @@ impl Rustpad {
 
     async fn send_initial(&self, id: u64, socket: &mut WebSocket) -> Result<usize> {
         socket.send(ServerMsg::Identity(id).into()).await?;
-        let mut messages = Vec::new();
+        let mut messages = vec![self.room_msg()];
         let revision = {
             let state = self.state.read();
             if !state.operations.is_empty() {
@@ -271,6 +315,9 @@ impl Rustpad {
             Err(()) => return Ok(()), // Ignore non-text messages
         };
         match msg {
+            // A read-only room drops edits. Clients rebuild from history when
+            // they see the room lock, so unacknowledged local edits vanish.
+            ClientMsg::Edit { .. } | ClientMsg::SetLanguage(_) if !self.writable() => {}
             ClientMsg::Edit {
                 revision,
                 operation,

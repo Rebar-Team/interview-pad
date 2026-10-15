@@ -40,6 +40,14 @@ services:
       SQLITE_URI: /data/rustpad.db
       EXPIRY_DAYS: ${EXPIRY_DAYS:-30}
       RUST_LOG: info
+      PUBLIC_ORIGIN: https://${DOMAIN}
+      SESSION_SECRET: ${SESSION_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_ALLOWED_DOMAIN: ${GOOGLE_ALLOWED_DOMAIN:-withrebar.ai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LUNA_ENABLED: ${LUNA_ENABLED:-1}
+      ROOM_TTL_MINUTES: ${ROOM_TTL_MINUTES:-360}
     volumes:
       - rustpad-data:/data
     <<: *default-logging
