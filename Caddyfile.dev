@@ -4,10 +4,17 @@
 }
 
 :3030 {
-    handle_path /pty/* {
-        @foreign not header Origin http://127.0.0.1:3030
-        respond @foreign "Local editor origin required" 403
-        reverse_proxy ptyd:8081
+    # `handle` blocks are mutually exclusive; `route` keeps the order as
+    # written: check the room, strip /pty so ptyd sees /<padId>, proxy.
+    handle /pty/* {
+        route {
+            forward_auth rustpad:3030 {
+                uri /api/pty-auth
+                copy_headers X-Room-Expires-At
+            }
+            uri strip_prefix /pty
+            reverse_proxy ptyd:8081
+        }
     }
     handle {
         reverse_proxy rustpad:3030

@@ -18,6 +18,13 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LUNA_ENABLED: "1"
+      PUBLIC_ORIGIN: http://127.0.0.1:3030
+      SESSION_SECRET: ${SESSION_SECRET:-local-only-session-secret-0123456789}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Passwordless sign-in at /auth/dev; the server ignores it off loopback.
+      DEV_LOGIN_EMAIL: ${DEV_LOGIN_EMAIL:-dev@withrebar.ai}
+      ROOM_TTL_MINUTES: ${ROOM_TTL_MINUTES:-360}
       LUNA_PROMPT_PATH: /prompts/luna.md
       EXPIRY_DAYS: "1"
     read_only: true

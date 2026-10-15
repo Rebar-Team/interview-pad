@@ -5,6 +5,15 @@ export type Answer = {
   cached_tokens: number;
 };
 
+export class AssistantError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** Same-origin Rust API. No credentials or model configuration in the browser. */
 export class AssistantClient {
   private controller?: AbortController;
@@ -29,13 +38,18 @@ export class AssistantClient {
       }
       const data = await response.json();
       if (!response.ok)
-        throw new Error(
+        throw new AssistantError(
+          response.status,
           (data.error || "Interview Assistant is unavailable.").replace(
             /\bLuna\b/g,
             "Interview Assistant",
           ),
         );
       return data;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError")
+        throw new Error("The Interview Assistant took too long. Try again.");
+      throw e;
     } finally {
       window.clearTimeout(timeout);
     }

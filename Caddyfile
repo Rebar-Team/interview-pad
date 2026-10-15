@@ -11,12 +11,22 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	# Interactive terminal WebSocket -> ptyd. handle_path strips /pty so ptyd
-	# sees /<padId>.
-	handle_path /pty/* {
-		reverse_proxy ptyd:8081
+	# Interactive terminal WebSocket -> ptyd, only while the room is writable.
+	# Rustpad's gate passes the room's lock time on to ptyd. `route` keeps the
+	# order as written: check the room, strip /pty so ptyd sees /<padId>, proxy.
+	handle /pty/* {
+		route {
+			forward_auth rustpad:3030 {
+				uri /api/pty-auth
+				copy_headers X-Room-Expires-At
+			}
+			uri strip_prefix /pty
+			reverse_proxy ptyd:8081
+		}
 	}
 
 	# Everything else -> Rustpad (editor UI + /api/socket collaboration WS).
-	reverse_proxy rustpad:3030
+	handle {
+		reverse_proxy rustpad:3030
+	}
 }

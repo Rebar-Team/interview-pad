@@ -1,8 +1,11 @@
-import { Box, Button, Flex, Text, Textarea } from "@chakra-ui/react";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
+import { Lock, Sparkles } from "lucide-react";
 import type { editor } from "monaco-editor/esm/vs/editor/editor.api";
 import { useEffect, useRef, useState } from "react";
 
-import { Answer, AssistantClient } from "./client";
+import { Answer, AssistantClient, AssistantError } from "./client";
 import { replacement } from "./proposal";
 
 type Turn = {
@@ -15,14 +18,14 @@ type Props = {
   padId: string;
   language: string;
   editor?: editor.IStandaloneCodeEditor;
-  dark: boolean;
+  readOnly: boolean;
 };
 
 export default function AssistantPanel({
   padId,
   language,
   editor: ed,
-  dark,
+  readOnly,
 }: Props) {
   const [client] = useState(() => new AssistantClient());
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -45,7 +48,7 @@ export default function AssistantPanel({
   async function send() {
     const question = draft.trim(),
       snapshot = ed?.getValue();
-    if (!question || snapshot === undefined || busy) return;
+    if (!question || snapshot === undefined || busy || readOnly) return;
     setBusy(true);
     setError("");
     setDraft("");
@@ -62,6 +65,15 @@ export default function AssistantPanel({
           items.map((t, i) => (i === items.length - 1 ? { ...t, answer } : t)),
         );
     } catch (e) {
+      // 409: a newer request from this browser (another tab) replaced this
+      // one. Drop the unanswered question rather than leave it hanging.
+      if (e instanceof AssistantError && e.status === 409) {
+        if (active.current)
+          setTurns((items) =>
+            items.filter((t, i) => i !== items.length - 1 || t.answer),
+          );
+        return;
+      }
       if (active.current)
         setError(
           e instanceof Error ? e.message : "Interview Assistant unavailable.",
@@ -115,127 +127,117 @@ export default function AssistantPanel({
   }
 
   return (
-    <Flex
-      as="aside"
+    <aside
       aria-label="Rebar Interview Assistant"
-      direction="column"
-      w="360px"
-      minW="300px"
-      maxW="45vw"
-      h="100%"
-      borderLeftWidth="1px"
-      borderColor={dark ? "#333" : "gray.200"}
-      bg={dark ? "#181818" : "gray.50"}
+      className="flex h-full w-[360px] max-w-[45vw] min-w-[300px] shrink-0 flex-col border-l bg-muted/30"
     >
-      <Flex p={4} align="center" justify="space-between">
-        <Text fontSize="sm" fontWeight="semibold">
-          Rebar Interview Assistant
-        </Text>
-        <Button size="xs" variant="outline" onClick={clear} isDisabled={busy}>
+      <div className="flex h-11 shrink-0 items-center justify-between border-b px-4">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Sparkles className="size-3.5 text-muted-foreground" />
+          Interview Assistant
+        </div>
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={clear}
+          disabled={busy || turns.length === 0}
+        >
           Clear chat
         </Button>
-      </Flex>
-      <Box flex={1} minH={0} overflowY="auto" px={4}>
-        {turns.map((turn, i) => (
-          <Box key={i} mb={5}>
-            <Text fontSize="xs" opacity={0.6} mb={1}>
-              You
-            </Text>
-            <Text fontSize="sm" whiteSpace="pre-wrap" overflowWrap="anywhere">
-              {turn.question}
-            </Text>
-            {turn.answer && (
-              <Box mt={4}>
-                <Text fontSize="xs" opacity={0.6} mb={1}>
-                  Rebar Interview Assistant
-                </Text>
-                <Text
-                  fontSize="sm"
-                  whiteSpace="pre-wrap"
-                  overflowWrap="anywhere"
-                >
-                  {turn.answer.message}
-                </Text>
-                {turn.answer.edit && (
-                  <Box mt={3} p={3} borderWidth="1px" borderRadius="md">
-                    <Text fontSize="xs" mb={1}>
-                      Replace
-                    </Text>
-                    <Box
-                      as="pre"
-                      fontSize="xs"
-                      whiteSpace="pre-wrap"
-                      overflowWrap="anywhere"
-                      color="red.300"
-                    >
-                      {turn.answer.edit.before}
-                    </Box>
-                    <Text fontSize="xs" my={1}>
-                      With
-                    </Text>
-                    <Box
-                      as="pre"
-                      fontSize="xs"
-                      whiteSpace="pre-wrap"
-                      overflowWrap="anywhere"
-                      color="green.300"
-                    >
-                      {turn.answer.edit.after || "(delete)"}
-                    </Box>
-                    <Button
-                      size="xs"
-                      mt={3}
-                      onClick={() => apply(turn, i)}
-                      isDisabled={turn.applied || !ed}
-                    >
-                      {turn.applied ? "Applied" : "Apply edit"}
-                    </Button>
-                  </Box>
-                )}
-              </Box>
-            )}
-          </Box>
-        ))}
-        {busy && (
-          <Text fontSize="sm" opacity={0.6}>
-            Working…
-          </Text>
-        )}
-        <div ref={end} />
-      </Box>
-      <Box p={4}>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="space-y-5 p-4">
+          {turns.length === 0 && !busy && (
+            <p className="text-sm text-muted-foreground">
+              Describe the logic you want and the assistant turns it into code
+              you can review and apply.
+            </p>
+          )}
+          {turns.map((turn, i) => (
+            <div key={i} className="space-y-3">
+              <div className="ml-6 rounded-lg bg-secondary px-3 py-2 text-sm wrap-anywhere whitespace-pre-wrap">
+                {turn.question}
+              </div>
+              {turn.answer && (
+                <div className="space-y-3">
+                  <p className="text-sm wrap-anywhere whitespace-pre-wrap">
+                    {turn.answer.message}
+                  </p>
+                  {turn.answer.edit && (
+                    <div className="overflow-hidden rounded-lg border bg-background text-xs">
+                      <pre className="max-h-48 overflow-auto bg-red-500/10 px-3 py-2 font-mono wrap-anywhere whitespace-pre-wrap text-red-700 dark:text-red-300">
+                        {turn.answer.edit.before || "(empty)"}
+                      </pre>
+                      <pre className="max-h-48 overflow-auto border-t bg-emerald-500/10 px-3 py-2 font-mono wrap-anywhere whitespace-pre-wrap text-emerald-700 dark:text-emerald-300">
+                        {turn.answer.edit.after || "(delete)"}
+                      </pre>
+                      <div className="flex justify-end border-t p-2">
+                        <Button
+                          size="xs"
+                          onClick={() => apply(turn, i)}
+                          disabled={turn.applied || !ed || readOnly}
+                        >
+                          {turn.applied ? "Applied" : "Apply edit"}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+          {busy && (
+            <p className="animate-pulse text-sm text-muted-foreground">
+              Thinking...
+            </p>
+          )}
+          <div ref={end} />
+        </div>
+      </ScrollArea>
+      <div className="shrink-0 border-t p-3">
         {error && (
-          <Text role="alert" fontSize="xs" color="red.300" mb={2}>
+          <p role="alert" className="mb-2 text-xs text-destructive">
             {error}
-          </Text>
+          </p>
         )}
-        <Textarea
-          aria-label="Ask Rebar Interview Assistant"
-          placeholder="Ask Rebar Interview Assistant"
-          value={draft}
-          rows={3}
-          resize="none"
-          fontSize="sm"
-          maxLength={2000}
-          isDisabled={busy}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-        />
-        <Flex mt={2} justify="flex-end" align="center">
-          <Button
-            size="sm"
-            onClick={send}
-            isDisabled={!draft.trim() || busy || !ed}
-          >
-            Send
-          </Button>
-        </Flex>
-      </Box>
-    </Flex>
+        {readOnly ? (
+          <div className="flex items-start gap-2 rounded-lg bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+            <Lock className="mt-0.5 size-3.5 shrink-0" />
+            The assistant is off because this room is read-only.
+          </div>
+        ) : (
+          <>
+            <Textarea
+              aria-label="Ask Rebar Interview Assistant"
+              placeholder="Ask the Interview Assistant"
+              value={draft}
+              rows={3}
+              className="max-h-40 resize-none text-sm"
+              maxLength={2000}
+              disabled={busy}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
+            <div className="mt-2 flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                Enter to send
+              </span>
+              <Button
+                size="sm"
+                onClick={send}
+                disabled={!draft.trim() || busy || !ed}
+              >
+                Send
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </aside>
   );
 }

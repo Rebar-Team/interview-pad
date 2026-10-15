@@ -17,7 +17,16 @@ export type RustpadOptions = {
   readonly onDesynchronized?: () => void;
   readonly onChangeLanguage?: (language: string) => void;
   readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
+  readonly onRoom?: (room: RoomStatus) => void;
   readonly reconnectInterval?: number;
+};
+
+/** Write window of the room, sent by the server on connect and on expiry. */
+export type RoomStatus = {
+  readonly expiresAt: number;
+  readonly writable: boolean;
+  /** The server's clock when it sent this, for skew correction. */
+  readonly serverNow: number;
 };
 
 /** A user currently editing the document. */
@@ -29,7 +38,8 @@ export type UserInfo = {
 /** Browser client for Rustpad. */
 class Rustpad {
   private ws?: WebSocket;
-  private connecting?: boolean;
+  private connecting?: WebSocket;
+  private disposed = false;
   private recentFailures: number = 0;
   private readonly model: editor.ITextModel;
   private readonly cursorLabels: CursorLabels;
@@ -109,6 +119,9 @@ class Rustpad {
     this.cursorLabels.dispose();
     this.oldDecorations = this.model.deltaDecorations(this.oldDecorations, []);
     window.removeEventListener("beforeunload", this.beforeUnload);
+    // Late socket events must never reach a newer client's callbacks.
+    this.disposed = true;
+    this.connecting?.close();
     this.ws?.close();
   }
 
@@ -136,11 +149,15 @@ class Rustpad {
    * to falsy values.
    */
   private tryConnect() {
-    if (this.connecting || this.ws) return;
-    this.connecting = true;
+    if (this.connecting || this.ws || this.disposed) return;
     const ws = new WebSocket(this.options.uri);
+    this.connecting = ws;
     ws.onopen = () => {
-      this.connecting = false;
+      this.connecting = undefined;
+      if (this.disposed) {
+        ws.close();
+        return;
+      }
       this.ws = ws;
       this.options.onConnected?.();
       this.users = {};
@@ -154,6 +171,7 @@ class Rustpad {
       }
     };
     ws.onclose = () => {
+      if (this.disposed) return;
       if (this.ws) {
         this.ws = undefined;
         this.users = {};
@@ -168,11 +186,11 @@ class Rustpad {
           this.options.onDesynchronized?.();
         }
       } else {
-        this.connecting = false;
+        this.connecting = undefined;
       }
     };
     ws.onmessage = ({ data }) => {
-      if (typeof data === "string") {
+      if (typeof data === "string" && !this.disposed) {
         this.handleMessage(JSON.parse(data));
       }
     };
@@ -198,6 +216,12 @@ class Rustpad {
           this.applyServer(operation);
         }
       }
+    } else if (msg.Room !== undefined) {
+      this.options.onRoom?.({
+        expiresAt: msg.Room.expires_at,
+        writable: msg.Room.writable,
+        serverNow: msg.Room.server_now,
+      });
     } else if (msg.Language !== undefined) {
       this.options.onChangeLanguage?.(msg.Language);
     } else if (msg.UserInfo !== undefined) {
@@ -473,6 +497,11 @@ type ServerMsg = {
     operations: UserOperation[];
   };
   Language?: string;
+  Room?: {
+    expires_at: number;
+    writable: boolean;
+    server_now: number;
+  };
   UserInfo?: {
     id: number;
     info: UserInfo | null;

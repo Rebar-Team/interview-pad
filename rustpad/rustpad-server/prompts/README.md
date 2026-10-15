@@ -1,18 +1,23 @@
-# Rebar Interview Assistant (local)
+# Rebar Interview Assistant
 
 All assistant logic runs in the existing Rust server. The React panel uses
 same-origin `/api/assistant/chat` and `/api/assistant/reset`; no sidecar or
 additional port is required. The server calls OpenAI directly with `gpt-6-luna`,
 low reasoning, no tools, no retries, and `store=false`.
 
-Enable locally with `LUNA_ENABLED=1` and server-only `OPENAI_API_KEY` from the
-ignored root `.env`. The feature is disabled by default and accepts only the
-exact local origin/host `http://127.0.0.1:3030`. Do not expose the local editor
-publicly; this is not a replacement for remote authentication.
+Enable with `LUNA_ENABLED=1` and server-only `OPENAI_API_KEY` from the root
+`.env`; without a key the panel is hidden. It accepts requests only from
+`PUBLIC_ORIGIN`, only for rooms that exist and are still writable (6 hours after
+creation). Each room gets 60 messages per hour, and at most 8 upstream calls run
+at once across the server. A newer request from the same browser in the same
+room cancels the older one, as does Clear chat, so a reload never leaves the
+panel stuck behind an abandoned call.
 
 Edit `luna.md` to configure instructions. Set `LUNA_PROMPT_PATH` to its absolute
-path (or read-only mount it into Docker). That file is read on each request, so
-changes apply on the next Send without recompilation. Without the variable, the
+path (or read-only mount it into Docker, as `compose.local.yaml` does). That file
+is read on each request, so changes apply on the next Send without
+recompilation. Production compose doesn't mount it, so there a prompt change
+ships with the next deploy. Without the variable, the
 build embeds this same Markdown file as its default. Size limit: 16 KB.
 Changing prompts cannot remove code-enforced edit or memory limits.
 

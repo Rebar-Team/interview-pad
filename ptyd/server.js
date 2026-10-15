@@ -80,7 +80,7 @@ function sanitizeId(raw) {
 function getSession(id) {
   let s = sessions.get(id);
   if (!s) {
-    s = { clients: new Set(), pty: null, container: null, lang: null, buffer: "", tail: "", idleTimer: null, cols: 80, rows: 24 };
+    s = { clients: new Set(), pty: null, container: null, lang: null, buffer: "", tail: "", idleTimer: null, lockTimer: null, cols: 80, rows: 24 };
     sessions.set(id, s);
   }
   return s;
@@ -192,6 +192,24 @@ function runCode(id, s, lang, code) {
   else s.pty.write(inject);
 }
 
+// setTimeout caps at ~24.8 days, so re-arm until the deadline really passes.
+function armLock(id, s, expiresAt) {
+  const ms = expiresAt - Date.now();
+  if (ms <= 0) { lockSession(id, s); return; }
+  s.lockTimer = setTimeout(() => armLock(id, s, expiresAt), Math.min(ms, 2 ** 31 - 1));
+}
+
+function lockSession(id, s) {
+  s.locked = true;
+  broadcast(s, { t: "info", d: "\r\n\x1b[33m[room is now read-only]\x1b[0m\r\n" });
+  stopShell(s);
+  // terminate, not close: a client ignoring the close handshake must not keep
+  // sending runs for another 30s.
+  for (const ws of s.clients) ws.terminate();
+  if (s.idleTimer) clearTimeout(s.idleTimer);
+  sessions.delete(id);
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }
   res.writeHead(404); res.end();
@@ -200,16 +218,27 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws, req) => {
-  const id = sanitizeId((req.url || "").split("?")[0].replace(/^\/+/, ""));
-  if (!id) { ws.close(1008, "bad session id"); return; }
+  // Exactly one plain ID segment, as rustpad's /api/pty-auth requires; never
+  // rewrite a path into some other session's ID.
+  const raw = (req.url || "").split("?")[0].replace(/^\//, "");
+  const id = sanitizeId(raw);
+  if (!id || id !== raw) { ws.close(1008, "bad session id"); return; }
+
+  // The proxy's room check (rustpad /api/pty-auth) passes the end of the
+  // room's writable window; the shell is torn down when it closes.
+  // No header means the request skipped that check, so refuse it.
+  const expiresAt = Number(req.headers["x-room-expires-at"]);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) { ws.close(4403, "room is read-only"); return; }
 
   const s = getSession(id);
   s.clients.add(ws);
+  if (!s.lockTimer) armLock(id, s, expiresAt);
   if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
 
   if (s.buffer) send(ws, { t: "out", d: s.buffer }); // replay screen to late joiners
 
   ws.on("message", (raw) => {
+    if (s.locked) return;
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
     // Never let a single bad message crash the service for every pad.
@@ -245,7 +274,8 @@ wss.on("connection", (ws, req) => {
     if (s.clients.size === 0) {
       s.idleTimer = setTimeout(() => {
         stopShell(s);
-        sessions.delete(id);
+        if (s.lockTimer) clearTimeout(s.lockTimer);
+        if (sessions.get(id) === s) sessions.delete(id);
       }, IDLE_KILL_MS);
     }
   });
