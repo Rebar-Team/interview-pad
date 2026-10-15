@@ -1,0 +1,15 @@
+{
+    auto_https off
+    admin off
+}
+
+:3030 {
+    handle_path /pty/* {
+        @foreign not header Origin http://127.0.0.1:3030
+        respond @foreign "Local editor origin required" 403
+        reverse_proxy ptyd:8081
+    }
+    handle {
+        reverse_proxy rustpad:3030
+    }
+}

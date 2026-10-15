@@ -58,6 +58,35 @@ docker compose up -d --build
 > socket and the stack needs a real Docker host (a VM/EC2, not Fargate/App
 > Runner). No privileged containers or cgroup tweaks required.
 
+## Local Interview Assistant
+
+For the local-only Rebar Interview Assistant, put `OPENAI_API_KEY` in the ignored
+root `.env`, then run:
+
+```bash
+docker compose -f compose.local.yaml up -d --build
+```
+
+Open `http://127.0.0.1:3030` (use that exact origin, not `localhost`). Only the
+gateway publishes a loopback port. Stop any existing preview using port 3030
+first. On macOS, choose your working Docker Desktop context if needed. This
+configuration does not deploy or change the production Compose stack.
+
+The assistant runs inside the existing Rust server, with a right-side chat panel
+and explicitly approved, undoable code edits. Its key stays server-side. Edit
+[`luna.md`](rustpad/rustpad-server/prompts/luna.md) to change its prompt on the
+next request. The prompt asks for missing implementation logic rather than
+solving, optimizing, or refactoring on the candidate's behalf. See
+[assistant details and offline checks](rustpad/rustpad-server/prompts/README.md).
+
+Pad contents and assistant memory are in-process in this local configuration;
+server restarts clear them. The terminal uses the existing Docker-based runner,
+which has Docker socket access; submitted programs run in separate non-root,
+resource-limited containers without the socket, host files, or assistant key.
+Run `scripts/prepare-runtimes.sh` against the same Docker engine to prepare all
+languages, including the custom TypeScript runtime. Python was live-verified;
+the other language runtimes were not exercised in this change.
+
 ## How execution works
 
 The editor opens a WebSocket to `/pty/<padId>` (Caddy proxies it to ptyd). ptyd

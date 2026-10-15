@@ -41,6 +41,7 @@ import useLocalStorageState from "use-local-storage-state";
 
 import Terminal, { TerminalHandle, isRunnable } from "./Terminal";
 import animals from "./animals.json";
+import AssistantPanel from "./assistant/AssistantPanel";
 import Rustpad, { UserInfo } from "./rustpad";
 import useHash from "./useHash";
 
@@ -88,7 +89,9 @@ function App() {
   const [name, setName] = useLocalStorageState("name", {
     defaultValue: generateName,
   });
-  const [hue, setHue] = useLocalStorageState("hue", { defaultValue: generateHue });
+  const [hue, setHue] = useLocalStorageState("hue", {
+    defaultValue: generateHue,
+  });
   const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
   const [darkMode, setDarkMode] = useLocalStorageState("darkMode", {
     defaultValue: true,
@@ -97,8 +100,12 @@ function App() {
   const id = useHash();
 
   const termRef = useRef<TerminalHandle>(null);
-  const [showTerminal, setShowTerminal] = useState(true);
+  const [showTerminal, setShowTerminal] = useState(false);
   const [running, setRunning] = useState(false);
+  const [pendingRun, setPendingRun] = useState<{
+    language: string;
+    code: string;
+  }>();
 
   // First-visit name prompt (remembered across sessions).
   const [nameAsked, setNameAsked] = useLocalStorageState("nameAsked", {
@@ -165,8 +172,16 @@ function App() {
       return;
     }
     setShowTerminal(true);
-    termRef.current?.run(language, model.getValue());
+    setPendingRun({ language, code: model.getValue() });
   }, [editor, language, toast]);
+
+  // Wait for the terminal's imperative handle to exist after opening it.
+  useEffect(() => {
+    if (showTerminal && pendingRun && termRef.current) {
+      termRef.current.run(pendingRun.language, pendingRun.code);
+      setPendingRun(undefined);
+    }
+  }, [showTerminal, pendingRun]);
 
   const handleRunRef = useRef(handleRun);
   handleRunRef.current = handleRun;
@@ -199,15 +214,21 @@ function App() {
   const fg = darkMode ? "#e6e6e6" : "#1e1e1e";
   const subtle = darkMode ? "#9a9a9a" : "#6b6b70";
   const connColor =
-    connection === "connected"
-      ? "#39d353"
-      : connection === "desynchronized"
-        ? "#f0b429"
-        : "#f04",
+      connection === "connected"
+        ? "#39d353"
+        : connection === "desynchronized"
+          ? "#f0b429"
+          : "#f04",
     others = Object.entries(users);
 
   return (
-    <Flex direction="column" h="100vh" overflow="hidden" bgColor={chromeBg} color={fg}>
+    <Flex
+      direction="column"
+      h="100vh"
+      overflow="hidden"
+      bgColor={chromeBg}
+      color={fg}
+    >
       {/* Toolbar */}
       <Flex
         align="center"
@@ -250,7 +271,11 @@ function App() {
           >
             {languageLabel(language)}
           </MenuButton>
-          <MenuList bg={darkMode ? "#252526" : "white"} borderColor={border} minW="160px">
+          <MenuList
+            bg={darkMode ? "#252526" : "white"}
+            borderColor={border}
+            minW="160px"
+          >
             {LANGUAGES.map((l) => (
               <MenuItem
                 key={l.id}
@@ -272,7 +297,11 @@ function App() {
         <Tooltip label={connection} textTransform="capitalize">
           <HStack spacing={1.5}>
             <Box w="8px" h="8px" borderRadius="full" bgColor={connColor} />
-            <Text fontSize="xs" color={subtle} display={{ base: "none", md: "block" }}>
+            <Text
+              fontSize="xs"
+              color={subtle}
+              display={{ base: "none", md: "block" }}
+            >
               {connection === "connected" ? "Live" : connection}
             </Text>
           </HStack>
@@ -293,7 +322,11 @@ function App() {
                 zIndex={others.length + 1}
               />
             </PopoverTrigger>
-            <PopoverContent w="240px" bg={darkMode ? "#252526" : "white"} borderColor={border}>
+            <PopoverContent
+              w="240px"
+              bg={darkMode ? "#252526" : "white"}
+              borderColor={border}
+            >
               <PopoverArrow bg={darkMode ? "#252526" : "white"} />
               <PopoverBody>
                 <Text fontSize="xs" color={subtle} mb={1}>
@@ -302,7 +335,9 @@ function App() {
                 <Input
                   size="sm"
                   value={name}
-                  onChange={(e) => e.target.value.length > 0 && setName(e.target.value)}
+                  onChange={(e) =>
+                    e.target.value.length > 0 && setName(e.target.value)
+                  }
                   bg={darkMode ? "#1e1e1e" : "white"}
                   borderColor={border}
                   color={fg}
@@ -334,7 +369,14 @@ function App() {
             </Tooltip>
           ))}
           {others.length > 4 && (
-            <Avatar size="sm" name={`+ ${others.length - 4}`} bg={subtle} color="white" border="2px solid" borderColor={barBg} />
+            <Avatar
+              size="sm"
+              name={`+ ${others.length - 4}`}
+              bg={subtle}
+              color="white"
+              border="2px solid"
+              borderColor={barBg}
+            />
           )}
         </HStack>
 
@@ -448,6 +490,13 @@ function App() {
             </Box>
           </>
         )}
+        <AssistantPanel
+          key={id}
+          padId={id}
+          language={language}
+          editor={editor}
+          dark={darkMode}
+        />
       </Flex>
 
       {/* First-visit name prompt */}

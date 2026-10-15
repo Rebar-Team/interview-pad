@@ -15,6 +15,7 @@ use warp::{filters::BoxedFilter, ws::Ws, Filter, Rejection, Reply};
 
 use crate::{database::Database, rustpad::Rustpad};
 
+mod assistant;
 pub mod database;
 mod ot;
 mod rustpad;
@@ -129,7 +130,7 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .and(state_filter)
         .and_then(stats_handler);
 
-    socket.or(text).or(stats).boxed()
+    socket.or(text).or(stats).or(assistant::routes()).boxed()
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
