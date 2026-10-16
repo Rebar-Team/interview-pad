@@ -8,8 +8,8 @@ low reasoning, no tools, no retries, and `store=false`.
 Enable with `LUNA_ENABLED=1` and server-only `OPENAI_API_KEY` from the root
 `.env`; without a key the panel is hidden. It accepts requests only from
 `PUBLIC_ORIGIN`, only for rooms that exist and are still writable (6 hours after
-creation). Each room gets 60 messages per hour, and at most 8 upstream calls run
-at once across the server. A newer request from the same browser in the same
+creation). Messages are unlimited within that window; at most 8 upstream calls
+run at once across the server. A newer request from the same browser in the same
 room cancels the older one, as does Clear chat, so a reload never leaves the
 panel stuck behind an abandoned call.
 
