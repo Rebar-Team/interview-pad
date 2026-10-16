@@ -4,6 +4,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// History kept per session and room. Fits the largest legal turn (2 KB
+/// question, 8 KB reply, 16 KB proposed patch) with room for earlier ones.
+const MAX_BYTES: usize = 64_000;
+
 #[derive(Clone, Serialize)]
 pub(super) struct Message {
     pub role: &'static str,
@@ -66,7 +70,7 @@ impl Memory {
                 .iter()
                 .map(|m| m.content.len())
                 .sum::<usize>()
-                > 24_000
+                > MAX_BYTES
         {
             entry.messages.drain(..2);
         }
@@ -117,7 +121,7 @@ mod tests {
         assert!(!memory.entries.contains_key("0"));
         memory.clear("1");
         assert!(!memory.entries.contains_key("1"));
-        memory.remember("big".into(), "q".repeat(24_001), "a".into(), now);
+        memory.remember("big".into(), "q".repeat(MAX_BYTES + 1), "a".into(), now);
         assert!(memory.read("big", now).is_empty());
     }
 }

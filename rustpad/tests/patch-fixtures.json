@@ -1,0 +1,104 @@
+[
+  {
+    "name": "add a function after an anchor keeps every existing line",
+    "code": "def a():\n    return 1\n",
+    "patch": "@@ def a():\n     return 1\n+\n+def b():\n+    return 2",
+    "result": "def a():\n    return 1\n\ndef b():\n    return 2\n"
+  },
+  {
+    "name": "modify one line inside a function",
+    "code": "def bfs(g, s):\n    q = [s]\n    while q:\n        n = q.pop()\n        print(n)\n",
+    "patch": "@@ def bfs(g, s):\n     while q:\n-        n = q.pop()\n+        n = q.pop(0)\n         print(n)",
+    "result": "def bfs(g, s):\n    q = [s]\n    while q:\n        n = q.pop(0)\n        print(n)\n"
+  },
+  {
+    "name": "@@ disambiguates lines that repeat",
+    "code": "def a():\n    x = 1\n\ndef b():\n    x = 1\n",
+    "patch": "@@ def b():\n-    x = 1\n+    x = 2",
+    "result": "def a():\n    x = 1\n\ndef b():\n    x = 2\n"
+  },
+  {
+    "name": "ambiguous lines without @@ are refused",
+    "code": "def a():\n    x = 1\n\ndef b():\n    x = 1\n",
+    "patch": "-    x = 1\n+    x = 2",
+    "result": null
+  },
+  {
+    "name": "two chunks apply in order",
+    "code": "a = 1\nb = 2\nc = 3\n",
+    "patch": "@@\n-a = 1\n+a = 10\n@@\n-c = 3\n+c = 30",
+    "result": "a = 10\nb = 2\nc = 30\n"
+  },
+  {
+    "name": "trailing whitespace differences still match",
+    "code": "def f():   \n    return 1\n",
+    "patch": " def f():\n-    return 1\n+    return 2",
+    "result": "def f():   \n    return 2\n"
+  },
+  {
+    "name": "indentation differences still match at the loosest level",
+    "code": "if x:\n\tdo()\n",
+    "patch": " if x:\n-    do()\n+    done()",
+    "result": "if x:\n    done()\n"
+  },
+  {
+    "name": "an empty buffer takes pure additions",
+    "code": "",
+    "patch": "+def main():\n+    pass",
+    "result": "def main():\n    pass"
+  },
+  {
+    "name": "additions after an @@ line go right after it",
+    "code": "class Board:\n    pass\n",
+    "patch": "@@ class Board:\n+    size = 3",
+    "result": "class Board:\n    size = 3\n    pass\n"
+  },
+  {
+    "name": "Codex envelope lines are tolerated",
+    "code": "x = 1\n",
+    "patch": "*** Begin Patch\n*** Update File: main.py\n-x = 1\n+x = 2\n*** End Patch",
+    "result": "x = 2\n"
+  },
+  {
+    "name": "lines that are not in the code are refused",
+    "code": "x = 1\n",
+    "patch": "-y = 1\n+y = 2",
+    "result": null
+  },
+  {
+    "name": "a missing @@ line is refused",
+    "code": "x = 1\n",
+    "patch": "@@ def nowhere():\n+    pass",
+    "result": null
+  },
+  {
+    "name": "a patch with no change is refused",
+    "code": "x = 1\n",
+    "patch": " x = 1",
+    "result": null
+  },
+  {
+    "name": "the @@ line repeated as the first context line",
+    "code": "function f(a) {\n  const x = 1;\n  return x;\n}\n",
+    "patch": "@@ function f(a) {\n function f(a) {\n+  if (!a) return 0;\n   const x = 1;",
+    "result": "function f(a) {\n  if (!a) return 0;\n  const x = 1;\n  return x;\n}\n"
+  },
+  {
+    "name": "an append at the end before an earlier change still lands at the end",
+    "code": "a = 1\nb = 2",
+    "patch": "+appended\n@@\n-a = 1\n+a = 2\n+a2 = 3",
+    "result": "a = 2\na2 = 3\nb = 2\nappended"
+  },
+  {
+    "name": "an append to code ending in a newline adds no blank line",
+    "code": "x = 1\n",
+    "patch": "+print(x)",
+    "result": "x = 1\nprint(x)\n"
+  },
+  {
+    "name": "a later change cannot reach back into an earlier one",
+    "code": "a\nb\nc",
+    "patch": "@@\n-a\n-b\n+x\n@@ a\n-b\n+y",
+    "result": null
+  }
+]

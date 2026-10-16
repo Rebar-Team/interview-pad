@@ -1,17 +1,24 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { Lock, Sparkles } from "lucide-react";
+import { Lock, Sparkles, TriangleAlert } from "lucide-react";
 import type { editor } from "monaco-editor/esm/vs/editor/editor.api";
 import { useEffect, useRef, useState } from "react";
 
 import { Answer, AssistantClient, AssistantError } from "./client";
-import { replacement } from "./proposal";
+import {
+  type Chunk,
+  applyPatch,
+  minimalEdit,
+  parsePatch,
+  removedLines,
+} from "./proposal";
 
 type Turn = {
+  /** Stable across the list shifting, so per-proposal state never moves. */
+  id: number;
   question: string;
   answer?: Answer;
-  snapshot: string;
   applied?: boolean;
 };
 type Props = {
@@ -33,6 +40,7 @@ export default function AssistantPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const active = useRef(true);
+  const nextId = useRef(0);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     active.current = true;
@@ -52,26 +60,35 @@ export default function AssistantPanel({
     setBusy(true);
     setError("");
     setDraft("");
-    setTurns((items) => [...items.slice(-5), { question, snapshot }]);
+    const id = nextId.current++;
+    setTurns((items) => [...items.slice(-5), { id, question }]);
     try {
+      const position = ed?.getPosition();
+      const selection = ed?.getSelection();
+      const selected =
+        selection && !selection.isEmpty()
+          ? (ed?.getModel()?.getValueInRange(selection) ?? "")
+          : "";
       const answer = await client.request("chat", {
         padId,
         language,
         code: snapshot,
         message: question,
+        // Where the user is, so "here" and "this function" resolve.
+        cursor: position
+          ? { line: position.lineNumber, selection: selected.slice(0, 4000) }
+          : undefined,
       });
       if (active.current)
         setTurns((items) =>
-          items.map((t, i) => (i === items.length - 1 ? { ...t, answer } : t)),
+          items.map((t) => (t.id === id ? { ...t, answer } : t)),
         );
     } catch (e) {
       // 409: a newer request from this browser (another tab) replaced this
       // one. Drop the unanswered question rather than leave it hanging.
       if (e instanceof AssistantError && e.status === 409) {
         if (active.current)
-          setTurns((items) =>
-            items.filter((t, i) => i !== items.length - 1 || t.answer),
-          );
+          setTurns((items) => items.filter((t) => t.id !== id || t.answer));
         return;
       }
       if (active.current)
@@ -96,14 +113,17 @@ export default function AssistantPanel({
     }
   }
 
-  function apply(turn: Turn, index: number) {
+  function apply(turn: Turn) {
     try {
       const model = ed?.getModel(),
-        edit = turn.answer?.edit;
-      if (!ed || !model || !edit) return;
-      const patch = replacement(model.getValue(), turn.snapshot, edit);
-      const a = model.getPositionAt(patch.start),
-        b = model.getPositionAt(patch.end);
+        patch = turn.answer?.patch;
+      if (!ed || !model || !patch) return;
+      // Re-locate against the live code (like Codex), so edits elsewhere since
+      // the question don't invalidate the proposal.
+      const current = model.getValue();
+      const change = minimalEdit(current, applyPatch(current, patch));
+      const a = model.getPositionAt(change.start),
+        b = model.getPositionAt(change.end);
       ed.pushUndoStop();
       ed.executeEdits("luna", [
         {
@@ -113,12 +133,12 @@ export default function AssistantPanel({
             endLineNumber: b.lineNumber,
             endColumn: b.column,
           },
-          text: patch.text,
+          text: change.text,
         },
       ]);
       ed.pushUndoStop();
       setTurns((items) =>
-        items.map((t, i) => (i === index ? { ...t, applied: true } : t)),
+        items.map((t) => (t.id === turn.id ? { ...t, applied: true } : t)),
       );
       setError("");
     } catch (e) {
@@ -153,8 +173,8 @@ export default function AssistantPanel({
               you can review and apply.
             </p>
           )}
-          {turns.map((turn, i) => (
-            <div key={i} className="space-y-3">
+          {turns.map((turn) => (
+            <div key={turn.id} className="space-y-3">
               <div className="ml-6 rounded-lg bg-secondary px-3 py-2 text-sm wrap-anywhere whitespace-pre-wrap">
                 {turn.question}
               </div>
@@ -163,24 +183,13 @@ export default function AssistantPanel({
                   <p className="text-sm wrap-anywhere whitespace-pre-wrap">
                     {turn.answer.message}
                   </p>
-                  {turn.answer.edit && (
-                    <div className="overflow-hidden rounded-lg border bg-background text-xs">
-                      <pre className="max-h-48 overflow-auto bg-red-500/10 px-3 py-2 font-mono wrap-anywhere whitespace-pre-wrap text-red-700 dark:text-red-300">
-                        {turn.answer.edit.before || "(empty)"}
-                      </pre>
-                      <pre className="max-h-48 overflow-auto border-t bg-emerald-500/10 px-3 py-2 font-mono wrap-anywhere whitespace-pre-wrap text-emerald-700 dark:text-emerald-300">
-                        {turn.answer.edit.after || "(delete)"}
-                      </pre>
-                      <div className="flex justify-end border-t p-2">
-                        <Button
-                          size="xs"
-                          onClick={() => apply(turn, i)}
-                          disabled={turn.applied || !ed || readOnly}
-                        >
-                          {turn.applied ? "Applied" : "Apply edit"}
-                        </Button>
-                      </div>
-                    </div>
+                  {turn.answer.patch && (
+                    <Proposal
+                      patch={turn.answer.patch}
+                      applied={!!turn.applied}
+                      disabled={!ed || readOnly}
+                      onApply={() => apply(turn)}
+                    />
                   )}
                 </div>
               )}
@@ -239,5 +248,94 @@ export default function AssistantPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * A proposal as a line diff. Deleting existing lines is never what an
+ * insertion should do, so it is called out and Apply needs a second click.
+ */
+function Proposal({
+  patch,
+  applied,
+  disabled,
+  onApply,
+}: {
+  patch: string;
+  applied: boolean;
+  disabled: boolean;
+  onApply: () => void;
+}) {
+  const [armed, setArmed] = useState(false);
+  let chunks: Chunk[] = [];
+  try {
+    chunks = parsePatch(patch);
+  } catch {
+    // The server validated it; an unparsable patch just renders empty.
+  }
+  const removed = removedLines(chunks);
+  return (
+    <div className="overflow-hidden rounded-lg border bg-background text-xs">
+      <pre className="max-h-64 overflow-auto py-2 font-mono wrap-anywhere whitespace-pre-wrap">
+        {chunks.map((chunk, c) => (
+          <div key={c}>
+            {chunk.context !== null && (
+              <div className="px-3 text-sky-700 dark:text-sky-300">
+                @@ {chunk.context}
+              </div>
+            )}
+            {chunk.lines.map((line, k) => (
+              <div
+                key={k}
+                className={
+                  line.op === "-"
+                    ? "bg-red-500/10 px-3 text-red-700 line-through decoration-red-500/40 dark:text-red-300"
+                    : line.op === "+"
+                      ? "bg-emerald-500/10 px-3 text-emerald-700 dark:text-emerald-300"
+                      : "px-3 text-muted-foreground"
+                }
+              >
+                {line.op === " " ? "  " : `${line.op} `}
+                {line.text || " "}
+              </div>
+            ))}
+          </div>
+        ))}
+      </pre>
+      {removed > 0 && !applied && (
+        <p className="flex items-start gap-1.5 border-t bg-red-500/10 px-3 py-2 text-red-700 dark:text-red-300">
+          <TriangleAlert className="mt-px size-3.5 shrink-0" />
+          Changes or removes {removed} existing line
+          {removed === 1 ? "" : "s"} of code.
+        </p>
+      )}
+      <div className="flex justify-end gap-2 border-t p-2">
+        {armed && !applied && (
+          <Button size="xs" variant="ghost" onClick={() => setArmed(false)}>
+            Cancel
+          </Button>
+        )}
+        <Button
+          size="xs"
+          variant={removed > 0 && !applied ? "destructive" : "default"}
+          disabled={applied || disabled}
+          onClick={() => {
+            if (removed > 0 && !armed) {
+              setArmed(true);
+              return;
+            }
+            onApply();
+          }}
+        >
+          {applied
+            ? "Applied"
+            : removed > 0
+              ? armed
+                ? `Yes, remove ${removed} line${removed === 1 ? "" : "s"}`
+                : "Apply edit"
+              : "Apply edit"}
+        </Button>
+      </div>
+    </div>
   );
 }
