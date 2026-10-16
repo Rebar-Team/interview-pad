@@ -1,7 +1,7 @@
-export type Edit = { before: string; after: string };
 export type Answer = {
   message: string;
-  edit: Edit | null;
+  /** Context-anchored patch; see proposal.ts. */
+  patch: string | null;
   cached_tokens: number;
 };
 
@@ -24,7 +24,9 @@ export class AssistantClient {
 
   async request(operation: "chat" | "reset", body: object): Promise<Answer> {
     this.controller = new AbortController();
-    const timeout = window.setTimeout(() => this.cancel(), 70_000);
+    // Above the server's worst case (a 60s call, plus one retry if the first
+    // finished within 30s).
+    const timeout = window.setTimeout(() => this.cancel(), 120_000);
     try {
       const response = await fetch(`/api/assistant/${operation}`, {
         method: "POST",

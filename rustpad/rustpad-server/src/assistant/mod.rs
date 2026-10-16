@@ -1,5 +1,6 @@
 mod client;
 mod memory;
+mod patch;
 
 use client::LunaClient;
 use log::{info, warn};
@@ -36,6 +37,19 @@ struct ChatRequest {
     code: String,
     #[serde(default)]
     language: String,
+    /// Where the user is in the editor, so "here" and "this" resolve.
+    #[serde(default)]
+    cursor: Option<Cursor>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cursor {
+    /// 1-based line number.
+    line: u32,
+    /// Selected text, if any.
+    #[serde(default)]
+    selection: String,
 }
 
 /// The newest request for one browser session in one room.
@@ -332,12 +346,15 @@ async fn respond_to(
     drop(permit);
     let reply = match result {
         Ok(answer) => {
-            state.memory.lock().remember(
-                key,
-                request.message,
-                answer.message.clone(),
-                Instant::now(),
-            );
+            // Keep the proposal too, so follow-ups build on what was offered.
+            let remembered = match &answer.patch {
+                Some(patch) => format!("{}\n\nProposed patch:\n{patch}", answer.message),
+                None => answer.message.clone(),
+            };
+            state
+                .memory
+                .lock()
+                .remember(key, request.message, remembered, Instant::now());
             respond(
                 StatusCode::OK,
                 serde_json::to_value(answer).unwrap(),
@@ -378,6 +395,7 @@ mod tests {
             message: "hi".into(),
             code: String::new(),
             language: "python".into(),
+            cursor: None,
         }
     }
 
