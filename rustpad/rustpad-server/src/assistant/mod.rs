@@ -2,13 +2,14 @@ mod client;
 mod memory;
 
 use client::LunaClient;
+use log::{info, warn};
 use memory::Memory;
 use parking_lot::Mutex;
 use rand::Rng;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     convert::Infallible,
     future::Future,
     sync::{
@@ -24,8 +25,6 @@ use crate::{auth::AuthConfig, rooms::Rooms};
 
 /// Upstream calls in flight across all rooms.
 const GLOBAL_CONCURRENCY: usize = 8;
-/// Chat messages a single room may send per hour.
-const ROOM_MESSAGES_PER_HOUR: usize = 60;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -51,7 +50,6 @@ struct Assistant {
     inflight: Mutex<HashMap<String, Inflight>>,
     generation: AtomicU64,
     global: Semaphore,
-    usage: Mutex<HashMap<String, VecDeque<Instant>>>,
     enabled: bool,
     rooms: Rooms,
     auth: AuthConfig,
@@ -82,7 +80,6 @@ impl Assistant {
             inflight: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(0),
             global: Semaphore::new(GLOBAL_CONCURRENCY),
-            usage: Mutex::new(HashMap::new()),
             enabled: enabled(),
             rooms,
             auth,
@@ -117,25 +114,6 @@ impl Assistant {
         if let Some(previous) = self.inflight.lock().remove(key) {
             previous.cancel.notify_one();
         }
-    }
-
-    /// Count a message against the room's hourly budget.
-    fn within_budget(&self, room: &str, now: Instant) -> bool {
-        let mut usage = self.usage.lock();
-        usage.retain(|_, times| {
-            while times.front().map_or(false, |t| {
-                now.duration_since(*t) >= Duration::from_secs(3600)
-            }) {
-                times.pop_front();
-            }
-            !times.is_empty()
-        });
-        let times = usage.entry(room.to_owned()).or_default();
-        if times.len() >= ROOM_MESSAGES_PER_HOUR {
-            return false;
-        }
-        times.push_back(now);
-        true
     }
 }
 
@@ -204,7 +182,37 @@ fn response(
     reply
 }
 
+/// Handle a request and log one line per call: operation, room, status and
+/// latency. Never the question or the code.
 async fn handle(
+    operation: String,
+    origin: Option<String>,
+    cookie: Option<String>,
+    request: ChatRequest,
+    state: Arc<Assistant>,
+) -> Result<warp::reply::Response, Infallible> {
+    let started = Instant::now();
+    let room = if request.pad_id.len() <= 64
+        && request
+            .pad_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        request.pad_id.clone()
+    } else {
+        "<invalid>".into()
+    };
+    let op = operation.chars().take(16).collect::<String>();
+    let reply = respond_to(operation, origin, cookie, request, state).await?;
+    info!(
+        "assistant {op} room={room} status={} took={}ms",
+        reply.status().as_u16(),
+        started.elapsed().as_millis()
+    );
+    Ok(reply)
+}
+
+async fn respond_to(
     operation: String,
     origin: Option<String>,
     cookie: Option<String>,
@@ -316,14 +324,6 @@ async fn handle(
         },
         _ = turn.cancel.notified() => return Ok(superseded()),
     };
-    // Charged only when a call is actually about to go upstream.
-    if !state.within_budget(&request.pad_id, Instant::now()) {
-        return Ok(respond(
-            StatusCode::TOO_MANY_REQUESTS,
-            json!({"error":"This room has used its assistant budget for the hour."}),
-            Some(&session),
-        ));
-    }
     let history = state.memory.lock().read(&key, Instant::now());
     let Some(result) = cancellable(state.client.reply(history, &request), &turn.cancel).await
     else {
@@ -344,11 +344,14 @@ async fn handle(
                 Some(&session),
             )
         }
-        Err(error) => respond(
-            StatusCode::BAD_GATEWAY,
-            json!({"error":error}),
-            Some(&session),
-        ),
+        Err(error) => {
+            warn!("assistant upstream error: {error}");
+            respond(
+                StatusCode::BAD_GATEWAY,
+                json!({"error":error}),
+                Some(&session),
+            )
+        }
     };
     drop(turn);
     Ok(reply)
@@ -498,18 +501,5 @@ mod tests {
             cancellable(futures::future::pending::<()>(), &turn.cancel).await,
             None
         );
-    }
-
-    #[test]
-    fn room_budget_is_hourly() {
-        let rooms = Rooms::new(None, Duration::from_secs(3600));
-        let state = Assistant::new(rooms, AuthConfig::default());
-        let now = Instant::now();
-        for _ in 0..ROOM_MESSAGES_PER_HOUR {
-            assert!(state.within_budget("r", now));
-        }
-        assert!(!state.within_budget("r", now));
-        assert!(state.within_budget("other", now));
-        assert!(state.within_budget("r", now + Duration::from_secs(3600)));
     }
 }
