@@ -76,7 +76,7 @@ ON CONFLICT(id) DO UPDATE SET
     /// Load a room by ID.
     pub async fn load_room(&self, id: &str) -> Result<Option<Room>> {
         sqlx::query_as(
-            r#"SELECT id, name, created_by, created_at, expires_at FROM room WHERE id = $1"#,
+            r#"SELECT id, name, created_by, created_at, expires_at, ended_at FROM room WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -103,12 +103,22 @@ VALUES
         Ok(())
     }
 
+    /// Persist the permanent end of an interview.
+    pub async fn end_room(&self, room: &Room) -> Result<()> {
+        sqlx::query("UPDATE room SET ended_at = COALESCE(ended_at, $2) WHERE id = $1")
+            .bind(&room.id)
+            .bind(room.ended_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// List all rooms, newest first.
     pub async fn list_rooms(&self) -> Result<Vec<Room>> {
         sqlx::query_as(
             // Pads migrated from before rooms existed have no creator; they stay
             // reachable by link but don't belong on the dashboard.
-            r#"SELECT id, name, created_by, created_at, expires_at FROM room WHERE created_by != '' ORDER BY created_at DESC LIMIT 500"#,
+            r#"SELECT id, name, created_by, created_at, expires_at, ended_at FROM room WHERE created_by != '' ORDER BY created_at DESC LIMIT 500"#,
         )
         .fetch_all(&self.pool)
         .await

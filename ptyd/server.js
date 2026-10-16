@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { WebSocketServer } from "ws";
+import { watchRoom } from "./room-watch.js";
 import pty from "node-pty";
 
 const PORT = process.env.PORT || 8081;
@@ -200,7 +201,10 @@ function armLock(id, s, expiresAt) {
 }
 
 function lockSession(id, s) {
+  if (s.locked) return;
   s.locked = true;
+  s.stopWatching?.();
+  if (s.lockTimer) clearTimeout(s.lockTimer);
   broadcast(s, { t: "info", d: "\r\n\x1b[33m[room is now read-only]\x1b[0m\r\n" });
   stopShell(s);
   // terminate, not close: a client ignoring the close handshake must not keep
@@ -232,12 +236,39 @@ wss.on("connection", (ws, req) => {
 
   const s = getSession(id);
   s.clients.add(ws);
+  if (!s.stopWatching) {
+    let resolveReady;
+    s.ready = new Promise((resolve) => { resolveReady = resolve; });
+    s.stopWatching = watchRoom(id, {
+      onReady: () => resolveReady(true),
+      onLock: () => { resolveReady(false); lockSession(id, s); },
+    });
+  }
   if (!s.lockTimer) armLock(id, s, expiresAt);
   if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
 
-  if (s.buffer) send(ws, { t: "out", d: s.buffer }); // replay screen to late joiners
+  // Send no scrollback or input until the backend confirms the room is open.
+  let authorized = false;
+  const pending = [];
+  s.ready.then((allowed) => {
+    if (!allowed || s.locked || ws.readyState !== ws.OPEN) return;
+    if (s.buffer) send(ws, { t: "out", d: s.buffer });
+    authorized = true;
+    for (const raw of pending) handleMessage(raw);
+    pending.length = 0;
+  });
 
   ws.on("message", (raw) => {
+    if (s.locked) return;
+    if (!authorized) {
+      if (pending.length >= 16 || raw.length > 256 * 1024) { ws.terminate(); return; }
+      pending.push(raw);
+      return;
+    }
+    handleMessage(raw);
+  });
+
+  function handleMessage(raw) {
     if (s.locked) return;
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
@@ -267,13 +298,14 @@ wss.on("connection", (ws, req) => {
       console.error("message handler error:", err);
       send(ws, { t: "info", d: `\r\n\x1b[31m[ptyd error: ${err.message}]\x1b[0m\r\n` });
     }
-  });
+  }
 
   ws.on("close", () => {
     s.clients.delete(ws);
-    if (s.clients.size === 0) {
+    if (s.clients.size === 0 && !s.locked) {
       s.idleTimer = setTimeout(() => {
         stopShell(s);
+        s.stopWatching?.();
         if (s.lockTimer) clearTimeout(s.lockTimer);
         if (sessions.get(id) === s) sessions.delete(id);
       }, IDLE_KILL_MS);

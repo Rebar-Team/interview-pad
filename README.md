@@ -64,7 +64,11 @@ docker compose up -d --build
 withrebar.ai Workspace (see [DEPLOY.md](DEPLOY.md#3b-google-sign-in)). Creating a
 room there is the only way to get one; candidates join at `/r/<roomId>` without
 signing in. A room accepts edits, the assistant and code runs for 6 hours after
-creation, then becomes read-only for good.
+creation, then becomes read-only for good. The room creator can also choose **End interview**
+at any time. Ending disconnects the candidate, displays “Thank you for interviewing
+with Rebar,” and permanently blocks candidate access through the room link.
+Signed-in Rebar interviewers can still review the saved code in read-only mode;
+editing, the assistant, and code execution are disabled.
 
 ## Local stack
 

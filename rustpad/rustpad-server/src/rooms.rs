@@ -25,12 +25,14 @@ pub struct Room {
     pub created_at: i64,
     /// End of the writable window, in milliseconds since the Unix epoch.
     pub expires_at: i64,
+    /// When the creator ended the interview, if ended manually.
+    pub ended_at: Option<i64>,
 }
 
 impl Room {
     /// Whether edits, the assistant and code execution are still allowed.
     pub fn writable(&self) -> bool {
-        now_ms() < self.expires_at
+        self.ended_at.is_none() && now_ms() < self.expires_at
     }
 
     /// Time left in the writable window.
@@ -75,7 +77,12 @@ impl Rooms {
         };
         let room = db.load_room(id).await?;
         if let Some(room) = &room {
-            self.memory.insert(id.to_owned(), room.clone());
+            return Ok(Some(
+                self.memory
+                    .entry(id.to_owned())
+                    .or_insert_with(|| room.clone())
+                    .clone(),
+            ));
         }
         Ok(room)
     }
@@ -89,9 +96,20 @@ impl Rooms {
             created_by: created_by.to_owned(),
             created_at,
             expires_at: created_at + self.ttl.as_millis() as i64,
+            ended_at: None,
         };
         if let Some(db) = &self.database {
             db.store_room(&room).await?;
+        }
+        self.memory.insert(room.id.clone(), room.clone());
+        Ok(room)
+    }
+
+    /// Permanently end a room. The caller must authorize its creator first.
+    pub async fn end(&self, mut room: Room) -> Result<Room> {
+        room.ended_at.get_or_insert_with(now_ms);
+        if let Some(db) = &self.database {
+            db.end_room(&room).await?;
         }
         self.memory.insert(room.id.clone(), room.clone());
         Ok(room)

@@ -31,6 +31,9 @@ pub struct Rustpad {
     /// Latched once the room locks, so a wall clock stepping backwards can
     /// never reopen it.
     locked: AtomicBool,
+    ended: AtomicBool,
+    /// Serializes periodic and final document saves.
+    pub persistence: tokio::sync::Mutex<()>,
 }
 
 /// Shared state involving multiple users, protected by a lock.
@@ -99,6 +102,7 @@ enum ServerMsg {
         expires_at: i64,
         writable: bool,
         server_now: i64,
+        ended: bool,
     },
 }
 
@@ -120,6 +124,8 @@ impl Default for Rustpad {
             killed: AtomicBool::new(false),
             expires_at: AtomicI64::new(i64::MAX),
             locked: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+            persistence: Default::default(),
         }
     }
 }
@@ -145,10 +151,10 @@ impl From<PersistedDocument> for Rustpad {
 
 impl Rustpad {
     /// Handle a connection from a WebSocket.
-    pub async fn on_connection(&self, socket: WebSocket) {
+    pub async fn on_connection(&self, socket: WebSocket, interviewer: bool) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
         info!("connection! id = {}", id);
-        if let Err(e) = self.handle_connection(id, socket).await {
+        if let Err(e) = self.handle_connection(id, socket, interviewer).await {
             warn!("connection terminated early: {}", e);
         }
         info!("disconnection, id = {}", id);
@@ -191,6 +197,15 @@ impl Rustpad {
         self.expires_at.store(expires_at, Ordering::Relaxed);
     }
 
+    /// Freeze the document and disconnect candidates.
+    pub fn end(&self) {
+        let _state = self.state.write();
+        self.ended.store(true, Ordering::Relaxed);
+        self.locked.store(true, Ordering::Relaxed);
+        self.announce_room();
+        self.notify.notify_waiters();
+    }
+
     /// Whether edits are still accepted.
     pub fn writable(&self) -> bool {
         if self.locked.load(Ordering::Relaxed) {
@@ -213,6 +228,7 @@ impl Rustpad {
             expires_at: self.expires_at.load(Ordering::Relaxed),
             writable: self.writable(),
             server_now: now_ms(),
+            ended: self.ended.load(Ordering::Relaxed),
         }
     }
 
@@ -221,9 +237,18 @@ impl Rustpad {
         self.killed.load(Ordering::Relaxed)
     }
 
-    async fn handle_connection(&self, id: u64, mut socket: WebSocket) -> Result<()> {
+    async fn handle_connection(
+        &self,
+        id: u64,
+        mut socket: WebSocket,
+        interviewer: bool,
+    ) -> Result<()> {
         let mut update_rx = self.update.subscribe();
 
+        if self.ended.load(Ordering::Relaxed) && !interviewer {
+            socket.send(self.room_msg().into()).await?;
+            return Ok(());
+        }
         let mut revision: usize = self.send_initial(id, &mut socket).await?;
 
         loop {
@@ -231,6 +256,10 @@ impl Rustpad {
             // notification, **then** check the current state for new revisions.
             // This is the same approach that `tokio::sync::watch` takes.
             let notified = self.notify.notified();
+            if self.ended.load(Ordering::Relaxed) && !interviewer {
+                socket.send(self.room_msg().into()).await?;
+                break;
+            }
             if self.killed() {
                 break;
             }
@@ -327,7 +356,11 @@ impl Rustpad {
                 self.notify.notify_waiters();
             }
             ClientMsg::SetLanguage(language) => {
-                self.state.write().language = Some(language.clone());
+                let mut state = self.state.write();
+                if !self.writable() {
+                    return Ok(());
+                }
+                state.language = Some(language.clone());
                 self.update.send(ServerMsg::Language(language)).ok();
             }
             ClientMsg::ClientInfo(info) => {
@@ -356,6 +389,9 @@ impl Rustpad {
             operation.target_len()
         );
         let state = self.state.upgradable_read();
+        if !self.writable() {
+            return Ok(());
+        }
         let len = state.operations.len();
         if revision > len {
             bail!("got revision {}, but current is {}", revision, len);

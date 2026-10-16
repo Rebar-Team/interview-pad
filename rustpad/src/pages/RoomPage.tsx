@@ -35,7 +35,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { type Room, roomUrl, useRoom } from "@/lib/api";
+import { ApiError, type Room, api, roomUrl, useRoom } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { formatDuration, useNow } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -101,7 +101,14 @@ export default function RoomPage({ id }: { id: string }) {
       </div>
     );
   }
-  if (room.isError) {
+  if (
+    room.isError &&
+    room.error instanceof ApiError &&
+    room.error.status === 410
+  ) {
+    return <InterviewEnded />;
+  }
+  if (room.isError && !room.data) {
     return (
       <NotFound
         title="Couldn't load this room"
@@ -117,11 +124,37 @@ export default function RoomPage({ id }: { id: string }) {
       />
     );
   }
-  return <Pad room={room.data} />;
+  return (
+    <Pad
+      key={id}
+      room={room.data}
+      refreshRoom={() => {
+        void room.refetch();
+      }}
+    />
+  );
 }
 
-function Pad({ room }: { room: Room }) {
+function InterviewEnded() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+      <Brand />
+      <h1 className="text-2xl font-semibold">
+        Thank you for interviewing with Rebar.
+      </h1>
+      <p className="text-muted-foreground">
+        Your interview has ended. You can close this window.
+      </p>
+    </div>
+  );
+}
+
+function Pad({ room, refreshRoom }: { room: Room; refreshRoom: () => void }) {
   const { id } = room;
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [ending, setEnding] = useState(false);
+  const refreshRoomRef = useRef(refreshRoom);
+  refreshRoomRef.current = refreshRoom;
   const theme = useTheme();
   const dark = theme === "dark";
   const [language, setLanguage] = useState("python");
@@ -143,6 +176,7 @@ function Pad({ room }: { room: Room }) {
   const [status, setStatus] = useState<RoomStatus>({
     expiresAt: room.expiresAt,
     writable: room.writable,
+    ended: !!room.endedAt,
     serverNow: room.serverNow ?? Date.now(),
   });
   // Server clock minus ours, so a fast or slow laptop clock doesn't lock the
@@ -153,7 +187,8 @@ function Pad({ room }: { room: Room }) {
   const [locallyExpired, setLocallyExpired] = useState(
     () => room.expiresAt <= Date.now() + skew,
   );
-  const readOnly = !status.writable || locallyExpired;
+  const ended = status.ended || !!room.endedAt;
+  const readOnly = ended || !status.writable || locallyExpired;
   const serverWritable = useRef(room.writable);
   // Bumped to rebuild the client, discarding unacked edits on lock.
   const [epoch, setEpoch] = useState(0);
@@ -201,7 +236,10 @@ function Pad({ room }: { room: Room }) {
         uri: getWsUri(id),
         editor,
         onConnected: () => setConnection("connected"),
-        onDisconnected: () => setConnection("disconnected"),
+        onDisconnected: () => {
+          setConnection("disconnected");
+          refreshRoomRef.current();
+        },
         onDesynchronized: () => {
           setConnection("desynchronized");
           toast.error("Desynchronized with server", {
@@ -213,6 +251,7 @@ function Pad({ room }: { room: Room }) {
         onChangeUsers: setUsers,
         onRoom: (next) => {
           setStatus(next);
+          if (next.ended) refreshRoomRef.current();
           setSkew(next.serverNow - Date.now());
           if (next.writable) setLocallyExpired(false);
           if (serverWritable.current && !next.writable) {
@@ -289,6 +328,23 @@ function Pad({ room }: { room: Room }) {
     toast.success("Link copied", {
       description: "Share it with your candidate to start pairing.",
     });
+  }
+
+  async function handleEnd() {
+    setEnding(true);
+    try {
+      await api.endRoom(id);
+      setStatus((current) => ({ ...current, writable: false, ended: true }));
+      setConfirmEnd(false);
+      refreshRoomRef.current();
+      toast.success("Interview ended");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't end the interview",
+      );
+    } finally {
+      setEnding(false);
+    }
   }
 
   const others = Object.entries(users);
@@ -399,7 +455,21 @@ function Pad({ room }: { room: Room }) {
           )}
         </div>
 
-        <Button size="sm" variant="outline" onClick={handleShare}>
+        {room.canEnd && !ended && (
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => setConfirmEnd(true)}
+          >
+            End interview
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleShare}
+          disabled={ended}
+        >
           <Link2 />
           Share
         </Button>
@@ -460,8 +530,9 @@ function Pad({ room }: { room: Room }) {
           className="flex shrink-0 items-center justify-center gap-2 border-b bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300"
         >
           <Lock className="size-3.5" />
-          This room is read-only. Interviews lock{" "}
-          {formatDuration(room.expiresAt - room.createdAt)} after creation.
+          {ended
+            ? "This interview has ended. Code is read-only."
+            : `This room is read-only. Interviews lock ${formatDuration(room.expiresAt - room.createdAt)} after creation.`}
         </div>
       )}
 
@@ -525,9 +596,37 @@ function Pad({ room }: { room: Room }) {
         )}
       </div>
 
+      <Dialog
+        open={confirmEnd}
+        onOpenChange={(open) => !ending && setConfirmEnd(open)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>End this interview?</DialogTitle>
+            <DialogDescription>
+              The candidate will be disconnected and cannot rejoin. The code
+              will remain read-only for signed-in Rebar interviewers. This
+              cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={ending}
+              onClick={() => setConfirmEnd(false)}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={ending} onClick={handleEnd}>
+              {ending ? "Ending…" : "End interview"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* First-visit name prompt */}
       <Dialog
-        open={!nameAsked}
+        open={!nameAsked && !ended}
         onOpenChange={(open) => !open && setNameAsked(true)}
       >
         <DialogContent className="sm:max-w-sm">

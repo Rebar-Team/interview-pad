@@ -6,7 +6,8 @@
   "description": "Interactive PTY runner for InterviewPad — streams a sandboxed container's terminal over WebSocket",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test *.test.js"
   },
   "dependencies": {
     "node-pty": "^1.0.0",
