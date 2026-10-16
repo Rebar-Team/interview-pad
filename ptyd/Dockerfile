@@ -14,7 +14,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY server.js ./
+COPY server.js room-watch.js ./
 
 ENV PORT=8081
 EXPOSE 8081

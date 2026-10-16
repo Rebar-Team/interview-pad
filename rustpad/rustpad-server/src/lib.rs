@@ -70,6 +70,8 @@ struct ServerState {
     database: Option<Database>,
     /// Interview rooms.
     rooms: Rooms,
+    /// Serializes document initialization with ending a room.
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Statistics about the server, returned from an API endpoint.
@@ -132,17 +134,21 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         documents: Default::default(),
         database: config.database,
         rooms: rooms.clone(),
+        lifecycle: Default::default(),
     };
     tokio::spawn(cleaner(state.clone(), config.expiry_days));
 
     let state_filter = warp::any().map(move || state.clone());
 
+    let user = optional_user(config.auth.clone());
     let socket = warp::path!("socket" / String)
         .and(warp::ws())
+        .and(user.clone())
         .and(state_filter.clone())
         .and_then(socket_handler);
 
     let text = warp::path!("text" / String)
+        .and(user.clone())
         .and(state_filter.clone())
         .and_then(text_handler);
 
@@ -156,7 +162,6 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .and_then(stats_handler);
 
     let auth = config.auth;
-    let user = optional_user(auth.clone());
     let with_auth = {
         let auth = auth.clone();
         warp::any().map(move || auth.clone())
@@ -194,7 +199,7 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
 
     let create_room = warp::path!("rooms")
         .and(warp::post())
-        .and(user)
+        .and(user.clone())
         .and(warp::header::optional::<String>("origin"))
         .and(with_auth.clone())
         .and(warp::body::content_length_limit(4096))
@@ -202,8 +207,17 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .and(state_filter.clone())
         .then(create_room_handler);
 
+    let end_room = warp::path!("rooms" / String / "end")
+        .and(warp::post())
+        .and(user.clone())
+        .and(warp::header::optional::<String>("origin"))
+        .and(with_auth.clone())
+        .and(state_filter.clone())
+        .then(end_room_handler);
+
     let get_room = warp::path!("rooms" / String)
         .and(warp::get())
+        .and(user)
         .and(state_filter.clone())
         .then(get_room_handler);
 
@@ -222,6 +236,7 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .or(list_rooms)
         .or(create_room)
         .or(get_room)
+        .or(end_room)
         .or(pty_auth)
         .or(assistant::routes(rooms, auth))
         .boxed()
@@ -239,6 +254,8 @@ struct PublicRoom<'a> {
     server_now: i64,
     /// Whether the interview assistant is available on this server.
     assistant: bool,
+    ended_at: Option<i64>,
+    can_end: bool,
 }
 
 impl<'a> From<&'a Room> for PublicRoom<'a> {
@@ -251,6 +268,8 @@ impl<'a> From<&'a Room> for PublicRoom<'a> {
             writable: room.writable(),
             server_now: rooms::now_ms(),
             assistant: assistant::enabled(),
+            ended_at: room.ended_at,
+            can_end: false,
         }
     }
 }
@@ -344,12 +363,70 @@ async fn create_room_handler(
 }
 
 /// Handler for `GET /api/rooms/{id}`.
-async fn get_room_handler(id: String, state: ServerState) -> Response {
+async fn get_room_handler(id: String, user: Option<User>, state: ServerState) -> Response {
     match state.rooms.get(&id).await {
-        Ok(Some(room)) => warp::reply::json(&PublicRoom::from(&room)).into_response(),
+        Ok(Some(room)) => {
+            if room.ended_at.is_some() && user.is_none() {
+                return interview_ended();
+            }
+            let mut view = PublicRoom::from(&room);
+            view.can_end = room.ended_at.is_none()
+                && user.as_ref().map(|u| u.email.as_str()) == Some(room.created_by.as_str());
+            warp::reply::json(&view).into_response()
+        }
         Ok(None) => json_error(StatusCode::NOT_FOUND, "Room not found"),
         Err(e) => internal(e),
     }
+}
+
+fn interview_ended() -> Response {
+    json_error(StatusCode::GONE, "Thank you for interviewing with Rebar.")
+}
+
+/// Only the authenticated creator may permanently end an interview.
+async fn end_room_handler(
+    id: String,
+    user: Option<User>,
+    origin: Option<String>,
+    auth: AuthConfig,
+    state: ServerState,
+) -> Response {
+    let Some(user) = user else {
+        return json_error(StatusCode::UNAUTHORIZED, "Sign in required");
+    };
+    if !auth.same_origin(origin.as_deref()) {
+        return json_error(StatusCode::FORBIDDEN, "Cross-origin request refused");
+    }
+    let _lifecycle = state.lifecycle.lock().await;
+    let room = match state.rooms.get(&id).await {
+        Ok(Some(room)) => room,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Room not found"),
+        Err(e) => return internal(e),
+    };
+    if room.created_by != user.email {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Only the room creator can end this interview",
+        );
+    }
+    let room = match state.rooms.end(room).await {
+        Ok(room) => room,
+        Err(e) => return internal(e),
+    };
+    let pad = state
+        .documents
+        .get(&id)
+        .map(|entry| Arc::clone(&entry.rustpad));
+    if let Some(pad) = pad {
+        pad.end();
+        if let Some(db) = &state.database {
+            let _save = pad.persistence.lock().await;
+            if let Err(e) = db.store(&id, &pad.snapshot()).await {
+                return internal(e);
+            }
+        }
+    }
+    warp::reply::json(&PublicRoom::from(&room)).into_response()
 }
 
 /// Handler for `/api/pty-auth`, the reverse proxy's gate in front of the code
@@ -392,14 +469,24 @@ async fn pty_auth_handler(
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
-async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<Response, Rejection> {
+async fn socket_handler(
+    id: String,
+    ws: Ws,
+    user: Option<User>,
+    state: ServerState,
+) -> Result<Response, Rejection> {
     use dashmap::mapref::entry::Entry;
+    let _lifecycle = state.lifecycle.lock().await;
 
     let room = match state.rooms.get(&id).await {
         Ok(Some(room)) => room,
         Ok(None) => return Ok(json_error(StatusCode::NOT_FOUND, "Room not found")),
         Err(e) => return Ok(internal(e)),
     };
+
+    if room.ended_at.is_some() && user.is_none() {
+        return Ok(interview_ended());
+    }
 
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
@@ -409,6 +496,9 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<Respon
                 None => Rustpad::default(),
             });
             rustpad.set_expiry(room.expires_at);
+            if room.ended_at.is_some() {
+                rustpad.end();
+            }
             if room.writable() {
                 tokio::spawn(expiry_announcer(Arc::clone(&rustpad), room.clone()));
             }
@@ -423,7 +513,7 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<Respon
     value.last_accessed = Instant::now();
     let rustpad = Arc::clone(&value.rustpad);
     Ok(ws
-        .on_upgrade(|socket| async move { rustpad.on_connection(socket).await })
+        .on_upgrade(|socket| async move { rustpad.on_connection(socket, user.is_some()).await })
         .into_response())
 }
 
@@ -447,8 +537,13 @@ async fn expiry_announcer(rustpad: Arc<Rustpad>, room: Room) {
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
-async fn text_handler(id: String, state: ServerState) -> Result<Response, Rejection> {
+async fn text_handler(
+    id: String,
+    user: Option<User>,
+    state: ServerState,
+) -> Result<Response, Rejection> {
     match state.rooms.get(&id).await {
+        Ok(Some(room)) if room.ended_at.is_some() && user.is_none() => return Ok(interview_ended()),
         Ok(Some(_)) => {}
         Ok(None) => return Ok(json_error(StatusCode::NOT_FOUND, "Room not found")),
         Err(e) => return Ok(internal(e)),
@@ -515,6 +610,7 @@ async fn persister(id: String, rustpad: Arc<Rustpad>, db: Database) {
         let interval = PERSIST_INTERVAL
             + rand::thread_rng().gen_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
         time::sleep(interval).await;
+        let _save = rustpad.persistence.lock().await;
         let revision = rustpad.revision();
         if revision > last_revision {
             info!("persisting revision {} for id = {}", revision, id);

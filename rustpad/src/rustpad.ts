@@ -25,6 +25,7 @@ export type RustpadOptions = {
 export type RoomStatus = {
   readonly expiresAt: number;
   readonly writable: boolean;
+  readonly ended?: boolean;
   /** The server's clock when it sent this, for skew correction. */
   readonly serverNow: number;
 };
@@ -220,6 +221,7 @@ class Rustpad {
       this.options.onRoom?.({
         expiresAt: msg.Room.expires_at,
         writable: msg.Room.writable,
+        ended: msg.Room.ended,
         serverNow: msg.Room.server_now,
       });
     } else if (msg.Language !== undefined) {
@@ -500,6 +502,7 @@ type ServerMsg = {
   Room?: {
     expires_at: number;
     writable: boolean;
+    ended?: boolean;
     server_now: number;
   };
   UserInfo?: {

@@ -352,3 +352,193 @@ async fn test_room_names_reject_hidden_characters() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn test_only_creator_can_end_interview() -> Result<()> {
+    let filter = server(ServerConfig::default());
+    let id = create_room(&filter).await;
+    let other = AuthConfig::default().mint_session(&rustpad_server::auth::User {
+        email: "grace@withrebar.ai".into(),
+        name: "Grace".into(),
+        picture: None,
+    });
+    for (cookie, request_origin, status) in [
+        (String::new(), origin(), 401),
+        (format!("rp_session={other}"), origin(), 403),
+        (session_cookie(), "https://evil.example".into(), 403),
+        (session_cookie(), String::new(), 403),
+    ] {
+        let resp = warp::test::request()
+            .method("POST")
+            .path(&format!("/api/rooms/{id}/end"))
+            .header("cookie", cookie)
+            .header("origin", request_origin)
+            .reply(&filter)
+            .await;
+        assert_eq!(resp.status(), status);
+    }
+    for (cookie, expected) in [
+        (session_cookie(), true),
+        (format!("rp_session={other}"), false),
+        (String::new(), false),
+    ] {
+        let resp = warp::test::request()
+            .path(&format!("/api/rooms/{id}"))
+            .header("cookie", cookie)
+            .reply(&filter)
+            .await;
+        let room: Value = serde_json::from_slice(resp.body())?;
+        assert_eq!(room["canEnd"], expected);
+        assert_eq!(room["writable"], true);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_end_disconnects_candidate_preserves_read_only_code_and_survives_restart() -> Result<()>
+{
+    let path = NamedTempFile::new()?.into_temp_path();
+    let uri = format!("sqlite://{}", path.to_str().unwrap());
+    let config = ServerConfig {
+        database: Some(Database::new(&uri).await?),
+        ..ServerConfig::default()
+    };
+    let filter = server(config.clone());
+    let id = create_room(&filter).await;
+    let mut candidate = connect(&filter, &id).await?;
+    within(candidate.recv()).await?; // Identity
+    candidate
+        .send(&json!({"Edit":{"revision":0,"operation":["print('hello')"]}}))
+        .await;
+    assert!(within(candidate.recv()).await?.get("History").is_some());
+    candidate.send(&json!({"SetLanguage":"python"})).await;
+    assert_eq!(
+        within(candidate.recv()).await?,
+        json!({"Language":"python"})
+    );
+
+    let mut interviewer = warp::test::ws()
+        .path(&format!("/api/socket/{id}"))
+        .header("cookie", session_cookie())
+        .handshake(filter.clone())
+        .await?;
+    for _ in 0..4 {
+        interviewer.recv().await?;
+    } // Identity, Room, History, Language
+    let mut ended_at = Value::Null;
+    for _ in 0..2 {
+        let resp = warp::test::request()
+            .method("POST")
+            .path(&format!("/api/rooms/{id}/end"))
+            .header("cookie", session_cookie())
+            .header("origin", origin())
+            .reply(&filter)
+            .await;
+        assert_eq!(resp.status(), 200);
+        let room: Value = serde_json::from_slice(resp.body())?;
+        assert_eq!(room["writable"], false);
+        assert_eq!(room["canEnd"], false);
+        if !ended_at.is_null() {
+            assert_eq!(room["endedAt"], ended_at);
+        }
+        ended_at = room["endedAt"].clone();
+        assert!(ended_at.is_i64());
+    }
+    // Active candidate receives an ended event before the connection is closed.
+    let ended = within(candidate.recv_raw()).await?;
+    assert_eq!(ended["Room"]["ended"], true);
+    within(candidate.recv_closed()).await?;
+
+    // Even a signed-in socket cannot edit or change the language after ending.
+    interviewer
+        .send_text(json!({"Edit":{"revision":1,"operation":[14,"!"]}}).to_string())
+        .await;
+    interviewer
+        .send_text(json!({"SetLanguage":"javascript"}).to_string())
+        .await;
+    interviewer
+        .send_text(json!({"ClientInfo":{"name":"barrier","hue":1}}).to_string())
+        .await;
+    time::timeout(Duration::from_secs(10), async {
+        loop {
+            let msg = interviewer.recv().await.unwrap();
+            let value: Value = serde_json::from_str(msg.to_str().unwrap()).unwrap();
+            assert!(value.get("History").is_none());
+            assert!(value.get("Language").is_none());
+            if value["UserInfo"]["info"]["name"] == "barrier" {
+                break;
+            }
+        }
+    })
+    .await?;
+    assert_eq!(
+        config
+            .database
+            .as_ref()
+            .unwrap()
+            .load(&id)
+            .await?
+            .language
+            .as_deref(),
+        Some("python")
+    );
+
+    // An immediate restart must keep both the final code and the access rule.
+    let restarted = server(config);
+    for app in [&filter, &restarted] {
+        for path in [format!("/api/rooms/{id}"), format!("/api/text/{id}")] {
+            let resp = warp::test::request().path(&path).reply(app).await;
+            assert_eq!(resp.status(), 410);
+        }
+        assert!(connect(app, &id).await.is_err());
+        let resp = warp::test::request()
+            .path(&format!("/api/text/{id}"))
+            .header("cookie", session_cookie())
+            .reply(app)
+            .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.body(), "print('hello')");
+        let resp = warp::test::request()
+            .path("/api/pty-auth")
+            .header("x-forwarded-uri", format!("/pty/{id}"))
+            .header("origin", origin())
+            .reply(app)
+            .await;
+        assert_eq!(resp.status(), 403);
+        let other = AuthConfig::default().mint_session(&rustpad_server::auth::User {
+            email: "grace@withrebar.ai".into(),
+            name: "Grace".into(),
+            picture: None,
+        });
+        let mut reviewer = warp::test::ws()
+            .path(&format!("/api/socket/{id}"))
+            .header("cookie", format!("rp_session={other}"))
+            .handshake(app.clone())
+            .await?;
+        reviewer.recv().await?;
+        let msg = reviewer.recv().await?;
+        let room: Value = serde_json::from_str(msg.to_str().unwrap())?;
+        assert_eq!(room["Room"]["ended"], true);
+        assert_eq!(room["Room"]["writable"], false);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_creator_can_end_expired_room_without_open_editor() -> Result<()> {
+    let filter = server(ServerConfig {
+        room_ttl: Duration::ZERO,
+        ..ServerConfig::default()
+    });
+    let id = create_room(&filter).await;
+    let resp = warp::test::request()
+        .method("POST")
+        .path(&format!("/api/rooms/{id}/end"))
+        .header("cookie", session_cookie())
+        .header("origin", origin())
+        .reply(&filter)
+        .await;
+    assert_eq!(resp.status(), 200);
+    assert!(connect(&filter, &id).await.is_err());
+    Ok(())
+}

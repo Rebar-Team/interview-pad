@@ -15,6 +15,8 @@ export type Room = {
   createdAt: number;
   expiresAt: number;
   writable: boolean;
+  endedAt?: number | null;
+  canEnd?: boolean;
   /** Server clock at response time; only on the public room endpoint. */
   serverNow?: number;
   /** Whether the interview assistant is available; public endpoint only. */
@@ -60,6 +62,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+  endRoom: (id: string) =>
+    request<Room>(`/api/rooms/${encodeURIComponent(id)}/end`, {
+      method: "POST",
+    }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
 
@@ -99,7 +105,13 @@ export function useRoom(id: string) {
         throw e;
       }
     },
-    staleTime: Infinity,
+    staleTime: 0,
+    refetchInterval: (query) =>
+      query.state.error instanceof ApiError && query.state.error.status === 410
+        ? false
+        : 10_000,
+    retry: (count, error) =>
+      !(error instanceof ApiError && error.status === 410) && count < 3,
   });
 }
 

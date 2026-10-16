@@ -344,6 +344,13 @@ async fn respond_to(
         return Ok(superseded());
     };
     drop(permit);
+    if !matches!(state.rooms.get(&request.pad_id).await, Ok(Some(room)) if room.writable()) {
+        return Ok(respond(
+            StatusCode::FORBIDDEN,
+            json!({"error":"This room is read-only."}),
+            Some(&session),
+        ));
+    }
     let reply = match result {
         Ok(answer) => {
             // Keep the proposal too, so follow-ups build on what was offered.
@@ -431,6 +438,17 @@ mod tests {
         let expired = Arc::new(expired);
         assert_eq!(
             call(&expired, "chat", request(&room.id)).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn ended_rooms_never_reach_model() {
+        let (state, id) = fixture().await;
+        let room = state.rooms.get(&id).await.unwrap().unwrap();
+        state.rooms.end(room).await.unwrap();
+        assert_eq!(
+            call(&state, "chat", request(&id)).await.status(),
             StatusCode::FORBIDDEN
         );
     }
