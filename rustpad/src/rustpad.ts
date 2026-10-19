@@ -215,6 +215,7 @@ class Rustpad {
         } else {
           operation = OpSeq.from_str(JSON.stringify(operation));
           this.applyServer(operation);
+          this.updateCursors(id);
         }
       }
     } else if (msg.Room !== undefined) {
@@ -243,7 +244,7 @@ class Rustpad {
       const { id, data } = msg.UserCursor;
       if (id !== this.me) {
         this.userCursors[id] = data;
-        this.updateCursors();
+        this.updateCursors(id);
       }
     }
   }
@@ -378,7 +379,7 @@ class Rustpad {
     this.updateCursors();
   }
 
-  private updateCursors() {
+  private updateCursors(activeUserId?: number) {
     const decorations: editor.IModelDeltaDecoration[] = [];
     const labels: CursorLabel[] = [];
 
@@ -432,11 +433,12 @@ class Rustpad {
       this.oldDecorations,
       decorations,
     );
-    this.cursorLabels.update(labels);
+    this.cursorLabels.update(labels, activeUserId);
   }
 
   private onChange(event: editor.IModelContentChangedEvent) {
     if (!this.ignoreChanges) {
+      this.cursorLabels.onLocalEdit();
       const content = this.lastValue;
       const contentLength = unicodeLength(content);
       let offset = 0;

@@ -6,6 +6,9 @@ import type {
 
 import "./cursor-labels.css";
 
+const LABEL_IDLE_MS = 2000;
+const LABEL_FADE_MS = 150;
+
 export type CursorLabel = {
   readonly id: string;
   readonly name: string;
@@ -18,6 +21,10 @@ export default class CursorLabels implements editor.IOverlayWidget {
   private readonly node = document.createElement("div");
   private readonly subscriptions: IDisposable[];
   private cursors: CursorLabel[] = [];
+  private lastActivity = new Map<string, number>();
+  private pointer?: { x: number; y: number };
+  private localEditUntil = 0;
+  private timer?: number;
   private frame?: number;
   private disposed = false;
 
@@ -31,6 +38,20 @@ export default class CursorLabels implements editor.IOverlayWidget {
       editor.onDidChangeHiddenAreas(() => this.scheduleLayout()),
       editor.onDidLayoutChange(() => this.scheduleLayout()),
       editor.onDidChangeConfiguration(() => this.scheduleLayout()),
+      editor.onDidChangeCursorPosition(() => this.scheduleLayout()),
+      editor.onDidFocusEditorText(() => this.scheduleLayout()),
+      editor.onDidBlurEditorText(() => this.scheduleLayout()),
+      editor.onMouseMove(({ event }) => {
+        this.pointer = {
+          x: event.browserEvent.clientX,
+          y: event.browserEvent.clientY,
+        };
+        this.scheduleLayout();
+      }),
+      editor.onMouseLeave(() => {
+        this.pointer = undefined;
+        this.scheduleLayout();
+      }),
     ];
   }
 
@@ -46,14 +67,29 @@ export default class CursorLabels implements editor.IOverlayWidget {
     return null;
   }
 
-  update(cursors: CursorLabel[]) {
+  update(cursors: CursorLabel[], activeUserId?: number) {
+    const now = Date.now();
+    this.lastActivity = new Map(
+      cursors.map((cursor) => [
+        cursor.id,
+        cursor.id.startsWith(`${activeUserId}:`)
+          ? now
+          : (this.lastActivity.get(cursor.id) ?? now),
+      ]),
+    );
     this.cursors = cursors;
+    this.scheduleLayout();
+  }
+
+  onLocalEdit() {
+    this.localEditUntil = Date.now() + LABEL_IDLE_MS;
     this.scheduleLayout();
   }
 
   dispose() {
     this.disposed = true;
     if (this.frame !== undefined) cancelAnimationFrame(this.frame);
+    window.clearTimeout(this.timer);
     this.subscriptions.forEach((subscription) => subscription.dispose());
     this.editor.removeOverlayWidget(this);
   }
@@ -67,6 +103,20 @@ export default class CursorLabels implements editor.IOverlayWidget {
   }
 
   private layout() {
+    window.clearTimeout(this.timer);
+    const now = Date.now();
+    const deadlines = Array.from(
+      this.lastActivity.values(),
+      (time) => time + LABEL_IDLE_MS + LABEL_FADE_MS,
+    );
+    deadlines.push(this.localEditUntil);
+    const nextDeadline = Math.min(...deadlines.filter((time) => time > now));
+    if (Number.isFinite(nextDeadline)) {
+      this.timer = window.setTimeout(
+        () => this.scheduleLayout(),
+        nextDeadline - now,
+      );
+    }
     this.node.replaceChildren();
     const layout = this.editor.getLayoutInfo();
     const leftEdge = layout.contentLeft;
@@ -75,6 +125,16 @@ export default class CursorLabels implements editor.IOverlayWidget {
     const bottomEdge = layout.height - layout.horizontalScrollbarHeight;
     this.node.style.width = `${layout.width}px`;
     this.node.style.height = `${layout.height}px`;
+    const editorRect = this.editor.getDomNode()!.getBoundingClientRect();
+    const editingRows =
+      this.editor.hasTextFocus() && now < this.localEditUntil
+        ? (this.editor.getSelections() ?? []).flatMap((selection) => {
+            const position = this.editor.getScrolledVisiblePosition(
+              selection.getPosition(),
+            );
+            return position ? [position] : [];
+          })
+        : [];
 
     const visibleRanges = this.editor.getVisibleRanges();
     const visible = this.cursors.flatMap((cursor) => {
@@ -111,6 +171,17 @@ export default class CursorLabels implements editor.IOverlayWidget {
     for (let index = 0; index < orderedGroups.length; index++) {
       const group = orderedGroups[index];
       const { anchor } = group[0];
+      const hovered =
+        this.pointer !== undefined &&
+        Math.abs(this.pointer.x - editorRect.left - anchor.left) <= 6 &&
+        this.pointer.y >= editorRect.top + anchor.top &&
+        this.pointer.y <= editorRect.top + anchor.top + anchor.height;
+      const elapsed =
+        now -
+        Math.max(
+          ...group.map(({ cursor }) => this.lastActivity.get(cursor.id)!),
+        );
+      if (!hovered && elapsed >= LABEL_IDLE_MS + LABEL_FADE_MS) continue;
       const label = document.createElement("div");
       label.className = "remote-cursor-label-group";
       label.style.zIndex = String(index + 1);
@@ -137,7 +208,12 @@ export default class CursorLabels implements editor.IOverlayWidget {
       const preferredTop = anchor.top - height - 2;
       const top =
         preferredTop >= 0 ? preferredTop : anchor.top + anchor.height + 2;
-      if (top + height > bottomEdge) {
+      if (
+        top + height > bottomEdge ||
+        editingRows.some(
+          (row) => top < row.top + row.height && top + height > row.top,
+        )
+      ) {
         label.remove();
         continue;
       }
@@ -153,6 +229,11 @@ export default class CursorLabels implements editor.IOverlayWidget {
       stem.style.top = `${Math.min(labelEnd, caretEnd)}px`;
       stem.style.height = `${Math.abs(caretEnd - labelEnd)}px`;
       stem.style.borderColor = `hsl(${group[0].cursor.hue}, 90%, 60%)`;
+      if (!hovered) {
+        for (const element of [label, stem]) {
+          element.style.animation = `remote-cursor-label-fade ${LABEL_FADE_MS}ms linear ${LABEL_IDLE_MS - elapsed}ms forwards`;
+        }
+      }
       this.node.prepend(stem);
     }
   }
