@@ -389,3 +389,122 @@ test("simultaneous buffered typing at the same position converges and publishes 
   await expectLabelsInViewport(observer, 2);
   await Promise.all([observer.close(), alex.close(), candidate.close()]);
 });
+
+async function hoverCaret(page: Page, lineNumber: number, column: number) {
+  const point = await page.evaluate(
+    (position) => {
+      const editor = window.pad.editor;
+      const anchor = editor.getScrolledVisiblePosition(position)!;
+      const rect = editor.getDomNode()!.getBoundingClientRect();
+      return {
+        x: rect.left + anchor.left + 2,
+        y: rect.top + anchor.top + anchor.height / 2,
+      };
+    },
+    { lineNumber, column },
+  );
+  await page.mouse.move(point.x, point.y);
+}
+
+test("idle names fade, hover reveals them, and only remote activity renews them", async ({
+  browser,
+}, testInfo) => {
+  const pad = await createRoom("idle");
+  const observer = await join(browser, pad, "Miguel");
+  const alex = await join(browser, pad, "Alex", 200);
+  await observer.evaluate(() =>
+    window.pad.editor.setValue("one\ntwo\nthree\nfour"),
+  );
+  await expect.poll(() => text(alex)).toContain("four");
+  await alex.evaluate(() =>
+    window.pad.editor.setSelection({
+      startLineNumber: 3,
+      startColumn: 1,
+      endLineNumber: 3,
+      endColumn: 4,
+    }),
+  );
+  const labels = observer.locator(".remote-cursor-label");
+  await expect(labels).toHaveCount(1);
+  await expect(labels).toHaveCount(0);
+  await expect(observer.locator(".remote-cursor-200")).toHaveCount(1);
+  await expect(observer.locator(".remote-selection-200")).toHaveCount(1);
+  await hoverCaret(observer, 3, 4);
+  await expect(labels).toHaveCount(1);
+  await observer.waitForTimeout(2300);
+  await expect(labels).toHaveCount(1);
+  await observer.mouse.move(850, 550);
+  await expect(labels).toHaveCount(0);
+
+  // Local edits transform remote positions, but must not wake idle labels.
+  await observer.evaluate(() => {
+    window.pad.editor.setPosition({ lineNumber: 1, column: 1 });
+    window.pad.editor.trigger("keyboard", "type", { text: "x" });
+  });
+  await expect.poll(() => text(alex)).toContain("xone");
+  await expect(labels).toHaveCount(0);
+  await position(alex, 3, 5);
+  await expect(labels).toHaveCount(1);
+  await expect(labels).toHaveCount(0);
+
+  // An edit elsewhere still counts as activity even if the caret stays put.
+  await alex.evaluate(() =>
+    window.pad.editor.executeEdits("test", [
+      {
+        range: {
+          startLineNumber: 4,
+          startColumn: 1,
+          endLineNumber: 4,
+          endColumn: 1,
+        },
+        text: "x",
+      },
+    ]),
+  );
+  await expect(labels).toHaveCount(1);
+  await Promise.all([observer.close(), alex.close()]);
+});
+
+test("typing suppresses overlapping stacked names, including hover, until idle", async ({
+  browser,
+}, testInfo) => {
+  const pad = await createRoom("suppression");
+  const observer = await join(browser, pad, "Miguel");
+  const alex = await join(browser, pad, "Alex", 200);
+  const sam = await join(browser, pad, "Sam", 30);
+  await observer.evaluate(() =>
+    window.pad.editor.setValue("one\ntwo\nthree\nfour"),
+  );
+  await expect.poll(() => text(alex)).toContain("four");
+  await expect.poll(() => text(sam)).toContain("four");
+  await position(alex, 3, 1);
+  await position(sam, 3, 1);
+  await expect(
+    observer.getByRole("listitem", {
+      name: "Alex, line 3, column 1",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    observer.getByRole("listitem", {
+      name: "Sam, line 3, column 1",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(observer.locator(".remote-cursor-label")).toHaveCount(2);
+  await observer.evaluate(() => {
+    window.pad.editor.focus();
+    window.pad.editor.setPosition({ lineNumber: 2, column: 1 });
+    window.pad.editor.trigger("keyboard", "type", { text: "x" });
+  });
+  await expect(observer.locator(".remote-cursor-label")).toHaveCount(0, {
+    timeout: 1000,
+  });
+  await hoverCaret(observer, 3, 1);
+  await expect(observer.locator(".remote-cursor-label")).toHaveCount(0);
+  await expect(observer.locator(".remote-cursor-200")).toHaveCount(1);
+  await expect(observer.locator(".remote-cursor-30")).toHaveCount(1);
+  await expect(observer.locator(".remote-cursor-label")).toHaveCount(2);
+  await expect(observer.locator(".remote-cursor-label-group")).toHaveCount(1);
+  await Promise.all([observer.close(), alex.close(), sam.close()]);
+});
