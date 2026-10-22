@@ -82,16 +82,11 @@ impl LunaClient {
                 Ok(()) => return Ok(answer),
                 Err(problem) if attempt == 0 && started.elapsed() < RETRY_WITHIN => {
                     input.push(json!({"role": "assistant", "content": raw_output(&data)}));
-                    input.push(json!({"role": "user", "content": format!(
-                        "Your patch could not be applied: {problem}. Return a corrected patch \
-                         against current_code, or patch null."
-                    )}));
+                    input.push(repair_request(request, &problem));
                 }
-                Err(_) => {
+                Err(problem) => {
                     answer.patch = None;
-                    answer.message = "No edit was proposed: the assistant's patch did not match \
-                        the current code. Ask again, naming the function to change."
-                        .into();
+                    answer.message = rejected_patch_message(&problem);
                     return Ok(answer);
                 }
             }
@@ -119,6 +114,20 @@ impl LunaClient {
             .await
             .map_err(|_| "Invalid OpenAI response".into())
     }
+}
+
+fn repair_request(request: &ChatRequest, problem: &str) -> Value {
+    json!({"role": "user", "content": json!({
+        "patch_error": problem,
+        "current_code": request.code,
+        "question": request.message,
+        "language": request.language,
+        "instruction": "Repair only the patch format or anchors for the original request. Copy anchors from current_code, not earlier proposals. Do not add new solution logic. Return a corrected patch, or patch null with an explanation if none is appropriate.",
+    }).to_string()})
+}
+
+fn rejected_patch_message(problem: &str) -> String {
+    format!("No edit was applied because the proposed patch failed validation: {problem}. Your code is unchanged.")
 }
 
 /// Validate a proposal against the code the model saw.
@@ -273,6 +282,19 @@ mod tests {
         assert_eq!(answer.cached_tokens, 128);
         let blank = decode(&completed(json!({"message":"Hi", "patch":"  "}))).unwrap();
         assert!(blank.patch.is_none());
+    }
+
+    #[test]
+    fn repair_uses_current_buffer_and_preserves_the_validation_reason() {
+        let req = request("def updated():\n    pass");
+        let turn = repair_request(&req, "@@ line not found");
+        let data: Value = serde_json::from_str(turn["content"].as_str().unwrap()).unwrap();
+        assert_eq!(data["current_code"], req.code);
+        assert_eq!(data["question"], req.message);
+        assert_eq!(data["patch_error"], "@@ line not found");
+        let message = rejected_patch_message("it changes more than 200 lines");
+        assert!(message.contains("more than 200 lines"));
+        assert!(!message.contains("did not match"));
     }
 
     #[test]

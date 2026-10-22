@@ -6,7 +6,8 @@ use std::{
 
 /// History kept per session and room. Fits the largest legal turn (2 KB
 /// question, 8 KB reply, 16 KB proposed patch) with room for earlier ones.
-const MAX_BYTES: usize = 64_000;
+const MAX_BYTES: usize = 128_000;
+const MAX_EXCHANGES: usize = 10;
 
 #[derive(Clone, Serialize)]
 pub(super) struct Message {
@@ -64,7 +65,7 @@ impl Memory {
                 content: answer,
             },
         ]);
-        while entry.messages.len() > 12
+        while entry.messages.len() > MAX_EXCHANGES * 2
             || entry
                 .messages
                 .iter()
@@ -94,15 +95,28 @@ mod tests {
     fn bounded_isolated_and_expiring() {
         let now = Instant::now();
         let mut memory = Memory::default();
-        for i in 0..10 {
+        for i in 0..15 {
             memory.remember("browser:pad".into(), i.to_string(), "reply".into(), now);
         }
-        assert_eq!(memory.read("browser:pad", now).len(), 12);
+        let history = memory.read("browser:pad", now);
+        assert_eq!(history.len(), 20);
+        assert_eq!(history[0].content, "5");
+        assert_eq!(history[18].content, "14");
         assert!(memory.read("other:pad", now).is_empty());
         assert!(memory.read("browser:other", now).is_empty());
         assert!(memory
             .read("browser:pad", now + Duration::from_secs(1800))
             .is_empty());
+    }
+
+    #[test]
+    fn retains_ten_exchanges_with_proposal_context() {
+        let mut memory = Memory::default();
+        let now = Instant::now();
+        for _ in 0..10 {
+            memory.remember("pad".into(), "q".repeat(2000), "p".repeat(10_000), now);
+        }
+        assert_eq!(memory.read("pad", now).len(), 20);
     }
 
     #[test]

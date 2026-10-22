@@ -30,7 +30,10 @@ export function parsePatch(patch: string): Chunk[] {
     if (line === "@@" || line.startsWith("@@ ")) {
       flush();
       const context = line.slice(2).trim();
-      current = { context: context || null, lines: [] };
+      // Range coordinates are not code anchors. Matching still uses actual
+      // context/removal lines and refuses ambiguous or missing targets.
+      const unified = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$/.test(line);
+      current = { context: unified ? null : context || null, lines: [] };
       return;
     }
     if (line === "") {

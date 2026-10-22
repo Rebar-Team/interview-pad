@@ -77,6 +77,26 @@ pub(super) fn changed_lines(patch: &str) -> usize {
         .count()
 }
 
+fn is_unified_header(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("@@ -") else {
+        return false;
+    };
+    let Some((old, rest)) = rest.split_once(" +") else {
+        return false;
+    };
+    let Some((new, suffix)) = rest.split_once(" @@") else {
+        return false;
+    };
+    let range = |text: &str| {
+        let parts: Vec<_> = text.split(',').collect();
+        parts.len() <= 2
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    range(old) && range(new) && (suffix.is_empty() || suffix.starts_with(' '))
+}
+
 fn parse(patch: &str) -> Result<Vec<Chunk>, String> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut current = Chunk::default();
@@ -90,7 +110,10 @@ fn parse(patch: &str) -> Result<Vec<Chunk>, String> {
                 chunks.push(std::mem::take(&mut current));
             }
             let context = line.strip_prefix("@@").unwrap_or_default().trim();
-            current.context = (!context.is_empty()).then(|| context.to_owned());
+            // Unified-diff ranges describe coordinates, not a literal code
+            // anchor. Ignore those coordinates and still require matching code.
+            current.context =
+                (!context.is_empty() && !is_unified_header(line)).then(|| context.to_owned());
             continue;
         }
         match line.chars().next() {
@@ -120,7 +143,7 @@ fn parse(patch: &str) -> Result<Vec<Chunk>, String> {
 
 /// Find `pattern` in `lines` at or after `start`, matching exactly, then
 /// ignoring trailing whitespace, then ignoring surrounding whitespace.
-/// Returns every match start at the loosest level that matched at all.
+/// Returns every match start at the strictest level that matched at all.
 fn seek(lines: &[String], pattern: &[String], start: usize) -> Vec<usize> {
     if pattern.is_empty() || pattern.len() > lines.len() {
         return Vec::new();
