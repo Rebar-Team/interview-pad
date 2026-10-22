@@ -6,6 +6,7 @@ import type { editor } from "monaco-editor/esm/vs/editor/editor.api";
 import { useEffect, useRef, useState } from "react";
 
 import { Answer, AssistantClient, AssistantError } from "./client";
+import { appendTurn } from "./history";
 import {
   type Chunk,
   applyPatch,
@@ -61,7 +62,7 @@ export default function AssistantPanel({
     setError("");
     setDraft("");
     const id = nextId.current++;
-    setTurns((items) => [...items.slice(-5), { id, question }]);
+    setTurns((items) => appendTurn(items, { id, question }));
     try {
       const position = ed?.getPosition();
       const selection = ed?.getSelection();

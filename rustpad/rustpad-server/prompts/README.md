@@ -23,7 +23,8 @@ build embeds this same Markdown file as its default. Size limit: 16 KB.
 Changing prompts cannot remove code-enforced edit or memory limits.
 
 Assistant memory is in-process and isolated by a random HttpOnly browser-session
-cookie plus pad ID. It holds six exchanges / 24 KB, with 30-minute idle eviction
+cookie plus pad ID. It holds up to ten exchanges (20 messages), with a 128 KB
+text budget, 30-minute idle eviction
 and a 64-session LRU cap. Clear memory deletes the current session/pad history;
 restarting clears all memory. Refresh clears the displayed chat but recent
 server memory can remain until cleared or expired. Old code snapshots are not
@@ -46,6 +47,10 @@ located in order, searching forward, matching exactly, then ignoring trailing
 whitespace, then ignoring surrounding whitespace. Lines that match in more than
 one place need an `@@` header. The server checks each patch against the code the
 model saw; if it doesn't apply, the reason goes back to the model for one retry.
+The retry repeats the current buffer rather than relying on previous proposals.
+Standard unified-diff range headers are accepted, but line numbers never bypass
+content matching or ambiguity checks. A rejected proposal reports its actual
+validation reason (including size limits) instead of a generic no-edit message.
 The panel locates the patch again against the live buffer at apply time, shows it
 as a diff, and asks for a second click when it changes or removes existing lines.
 Apply uses Monaco's undoable edit path, preserving normal collaborative
