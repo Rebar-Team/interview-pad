@@ -27,12 +27,15 @@ export function usePathname(): string {
 export type Route =
   | { page: "home" }
   | { page: "room"; id: string }
+  | { page: "assistantLog"; id: string }
   | { page: "missing" };
 
 export function matchRoute(pathname: string): Route {
   if (pathname === "/") return { page: "home" };
   const room = pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})\/?$/);
   if (room) return { page: "room", id: room[1] };
+  const log = pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})\/assistant-log\/?$/);
+  if (log) return { page: "assistantLog", id: log[1] };
   return { page: "missing" };
 }
 

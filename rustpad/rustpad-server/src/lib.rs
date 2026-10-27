@@ -130,8 +130,16 @@ fn frontend() -> BoxedFilter<(impl Reply,)> {
 fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
     let room_ttl = config.room_ttl;
     let rooms = Rooms::new(config.database.clone(), room_ttl);
+    let documents: Arc<DashMap<String, Document>> = Default::default();
+    let live = Arc::clone(&documents);
+    let assistant = assistant::routes(
+        rooms.clone(),
+        config.auth.clone(),
+        config.database.clone(),
+        Arc::new(move |id: &str| live.get(id).map(|d| Arc::clone(&d.rustpad))),
+    );
     let state = ServerState {
-        documents: Default::default(),
+        documents,
         database: config.database,
         rooms: rooms.clone(),
         lifecycle: Default::default(),
@@ -238,7 +246,7 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .or(get_room)
         .or(end_room)
         .or(pty_auth)
-        .or(assistant::routes(rooms, auth))
+        .or(assistant)
         .boxed()
 }
 

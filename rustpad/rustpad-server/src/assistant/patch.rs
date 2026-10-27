@@ -29,6 +29,9 @@ pub(super) struct Replacement {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Chunk {
     context: Option<String>,
+    /// Started by a unified-diff `@@ -a,b +c,d @@` header, whose line numbers
+    /// are ignored.
+    unified: bool,
     /// `(' ' | '-' | '+', text)` in patch order.
     ops: Vec<(char, String)>,
 }
@@ -77,16 +80,12 @@ pub(super) fn changed_lines(patch: &str) -> usize {
         .count()
 }
 
-fn is_unified_header(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("@@ -") else {
-        return false;
-    };
-    let Some((old, rest)) = rest.split_once(" +") else {
-        return false;
-    };
-    let Some((new, suffix)) = rest.split_once(" @@") else {
-        return false;
-    };
+/// For a unified-diff header (`@@ -a,b +c,d @@ section`), the section name
+/// after its line numbers, which may be empty.
+fn unified_section(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let (new, suffix) = rest.split_once(" @@")?;
     let range = |text: &str| {
         let parts: Vec<_> = text.split(',').collect();
         parts.len() <= 2
@@ -94,26 +93,32 @@ fn is_unified_header(line: &str) -> bool {
                 .iter()
                 .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
     };
-    range(old) && range(new) && (suffix.is_empty() || suffix.starts_with(' '))
+    (range(old) && range(new) && (suffix.is_empty() || suffix.starts_with(' ')))
+        .then(|| suffix.trim())
 }
 
 fn parse(patch: &str) -> Result<Vec<Chunk>, String> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut current = Chunk::default();
-    for (n, line) in patch.lines().enumerate() {
+    // Split like the panel does, so a `\r` inside a line is kept.
+    let body = patch.strip_suffix('\n').unwrap_or(patch);
+    for (n, line) in body.split('\n').enumerate() {
         // Tolerate the envelope Codex-trained models like to add.
         if line.starts_with("*** ") {
             continue;
         }
         if line == "@@" || line.starts_with("@@ ") {
-            if current != Chunk::default() {
+            if current.context.is_some() || !current.ops.is_empty() {
                 chunks.push(std::mem::take(&mut current));
             }
-            let context = line.strip_prefix("@@").unwrap_or_default().trim();
             // Unified-diff ranges describe coordinates, not a literal code
-            // anchor. Ignore those coordinates and still require matching code.
-            current.context =
-                (!context.is_empty() && !is_unified_header(line)).then(|| context.to_owned());
+            // anchor. Ignore them, keep any section name as the anchor, and
+            // still require matching code.
+            let section = unified_section(line);
+            let context =
+                section.unwrap_or_else(|| line.strip_prefix("@@").unwrap_or_default().trim());
+            current.context = (!context.is_empty()).then(|| context.to_owned());
+            current.unified = section.is_some();
             continue;
         }
         match line.chars().next() {
@@ -128,7 +133,7 @@ fn parse(patch: &str) -> Result<Vec<Chunk>, String> {
             }
         }
     }
-    if current != Chunk::default() {
+    if current.context.is_some() || !current.ops.is_empty() {
         chunks.push(current);
     }
     if chunks.is_empty()
@@ -200,6 +205,12 @@ pub(super) fn locate(code: &str, patch: &str) -> Result<Vec<Replacement>, String
             }
         }
         let old = chunk.old();
+        if old.is_empty() && chunk.unified && chunk.context.is_none() {
+            // Its line numbers were the only location given, and they are ignored.
+            return Err(
+                "an insertion needs a context line or an @@ line naming where it goes".into(),
+            );
+        }
         if old.is_empty() {
             // Pure addition: after the @@ line, into an empty buffer, or at the
             // end (before a final newline, so no blank line is added).
@@ -253,9 +264,32 @@ pub(super) fn locate(code: &str, patch: &str) -> Result<Vec<Replacement>, String
     Ok(out)
 }
 
+/// The patch undoing `patch`: added lines become removed ones and back.
+pub(super) fn reverse(patch: &str) -> String {
+    patch
+        .split('\n')
+        .map(|line| match line.as_bytes().first() {
+            Some(b'+') => format!("-{}", &line[1..]),
+            Some(b'-') => format!("+{}", &line[1..]),
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether `code` contains the result of `patch`, located the same way as
+/// applying it: its undo applies, and either it no longer applies or (when it
+/// only adds lines around context that stays intact) it adds more than it
+/// removes. Edits can be reverted by anyone's Ctrl+Z, so this, not a stored
+/// flag, says whether an edit is applied.
+pub(super) fn contains(code: &str, patch: &str) -> bool {
+    let added = patch.lines().filter(|l| l.starts_with('+')).count();
+    let removed = patch.lines().filter(|l| l.starts_with('-')).count();
+    locate(code, &reverse(patch)).is_ok() && (locate(code, patch).is_err() || added > removed)
+}
+
 /// Apply located replacements to `code`.
-#[cfg(test)]
-fn apply(code: &str, replacements: &[Replacement]) -> String {
+pub(super) fn apply(code: &str, replacements: &[Replacement]) -> String {
     let mut lines: Vec<String> = if code.is_empty() {
         Vec::new()
     } else {
@@ -299,6 +333,29 @@ mod tests {
         assert!(err.contains("more than once"), "{err}");
         let err = locate("x", "x\n+y").unwrap_err();
         assert!(err.contains("must start with"), "{err}");
+    }
+
+    #[test]
+    fn contains_tells_applied_from_not_applied() {
+        for (name, code, patch) in [
+            (
+                "insertion",
+                "def f():\n    return 1",
+                "@@\n def f():\n+    x = 1\n     return 1",
+            ),
+            ("insertion at the end", "a\nb", "@@\n b\n+c"),
+            ("replacement", "a\nb\nc", "@@\n a\n-b\n+B\n c"),
+            ("deletion", "a\nb\nc", "@@\n a\n-b\n c"),
+            ("deletion at the end", "a\nb", "@@\n a\n-b"),
+            ("empty buffer", "", "@@\n+print(1)"),
+        ] {
+            assert!(!contains(code, patch), "{name} before");
+            let after = apply(code, &locate(code, patch).unwrap());
+            assert!(contains(&after, patch), "{name} after");
+            let undone = apply(&after, &locate(&after, &reverse(patch)).unwrap());
+            assert_eq!(undone, code, "{name} undo");
+            assert!(!contains(&undone, patch), "{name} after undo");
+        }
     }
 
     #[test]

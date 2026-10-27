@@ -6,6 +6,12 @@ use warp::{filters::BoxedFilter, test::WsClient, Reply};
 /// A test WebSocket client that sends and receives JSON messages.
 pub struct JsonSocket(WsClient);
 
+impl From<WsClient> for JsonSocket {
+    fn from(client: WsClient) -> Self {
+        Self(client)
+    }
+}
+
 impl JsonSocket {
     pub async fn send(&mut self, msg: &Value) {
         self.0.send_text(msg.to_string()).await
