@@ -23,6 +23,34 @@ export type Room = {
   assistant?: boolean;
 };
 
+/** One assistant interaction, logged in full. */
+export type AssistantLogEntry = {
+  id: number;
+  createdAt: number;
+  author: string;
+  question: string;
+  language: string;
+  cursor: { line: number; selection: string } | null;
+  code: string;
+  model: string;
+  history: { role: string; content: string }[];
+  askedAlready: boolean;
+  attempts: {
+    output: string;
+    problem: string | null;
+    took_ms: number;
+    usage: { input_tokens?: number; output_tokens?: number } | null;
+  }[];
+  reply: {
+    kind: string;
+    content: string;
+    patch: string | null;
+    notice: string | null;
+  };
+  error: string | null;
+  tookMs: number;
+};
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -66,6 +94,10 @@ export const api = {
     request<Room>(`/api/rooms/${encodeURIComponent(id)}/end`, {
       method: "POST",
     }),
+  assistantLog: (id: string) =>
+    request<AssistantLogEntry[]>(
+      `/api/assistant/${encodeURIComponent(id)}/log`,
+    ),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
 

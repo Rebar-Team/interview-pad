@@ -380,6 +380,42 @@ impl Rustpad {
         Ok(())
     }
 
+    /// Replace the text with `edit(current text)` as one new revision, under
+    /// the document lock so no other edit can interleave; `Ok(None)` leaves it
+    /// as is. Used for edits made on the server, such as applying an Interview
+    /// Assistant proposal.
+    pub fn edit_text(
+        &self,
+        edit: impl FnOnce(&str) -> Result<Option<String>, String>,
+    ) -> Result<(), String> {
+        let state = self.state.upgradable_read();
+        if !self.writable() {
+            return Err("This room is read-only.".into());
+        }
+        let Some(new_text) = edit(&state.text)? else {
+            return Ok(());
+        };
+        let operation = replace_operation(&state.text, &new_text);
+        let mut state = RwLockUpgradableReadGuard::upgrade(state);
+        for (_, data) in state.cursors.iter_mut() {
+            for cursor in data.cursors.iter_mut() {
+                *cursor = transform_index(&operation, *cursor);
+            }
+            for (start, end) in data.selections.iter_mut() {
+                *start = transform_index(&operation, *start);
+                *end = transform_index(&operation, *end);
+            }
+        }
+        state.operations.push(UserOperation {
+            id: u64::MAX,
+            operation,
+        });
+        state.text = new_text;
+        drop(state);
+        self.notify.notify_waiters();
+        Ok(())
+    }
+
     fn apply_edit(&self, id: u64, revision: usize, mut operation: OperationSeq) -> Result<()> {
         info!(
             "edit: id = {}, revision = {}, base_len = {}, target_len = {}",
@@ -419,5 +455,57 @@ impl Rustpad {
         state.operations.push(UserOperation { id, operation });
         state.text = new_text;
         Ok(())
+    }
+}
+
+/// The operation turning `old` into `new`: keep their common prefix and
+/// suffix, replace the middle. Lengths are in characters, as OT counts them.
+fn replace_operation(old: &str, new: &str) -> OperationSeq {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut operation = OperationSeq::default();
+    operation.retain(prefix as u64);
+    operation.delete((old.len() - prefix - suffix) as u64);
+    operation.insert(&new[prefix..new.len() - suffix].iter().collect::<String>());
+    operation.retain(suffix as u64);
+    operation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_edits_become_one_revision() {
+        let pad = Rustpad::default();
+        pad.edit_text(|_| Ok(Some("héllo world".into()))).unwrap();
+        pad.edit_text(|text| Ok(Some(text.replace("world", "there"))))
+            .unwrap();
+        assert_eq!(pad.text(), "héllo there");
+        assert_eq!(pad.revision(), 2);
+        pad.edit_text(|_| Ok(None)).unwrap();
+        assert_eq!(pad.revision(), 2, "no change adds no revision");
+        let err = pad.edit_text(|_| Err("no".into())).unwrap_err();
+        assert_eq!(err, "no");
+        assert_eq!(pad.revision(), 2, "a refused edit adds nothing");
+    }
+
+    #[test]
+    fn replace_operation_round_trips() {
+        for (old, new) in [
+            ("", "a"),
+            ("abc", ""),
+            ("aXc", "aYYc"),
+            ("é1é", "é2é"),
+            ("same", "same"),
+        ] {
+            assert_eq!(replace_operation(old, new).apply(old).unwrap(), new);
+        }
     }
 }

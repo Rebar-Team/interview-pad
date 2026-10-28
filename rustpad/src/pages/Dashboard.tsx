@@ -18,7 +18,12 @@ import { ApiError, type Me, type Room, roomUrl, useRooms } from "@/lib/api";
 import { navigate } from "@/lib/router";
 import { formatDuration, formatRelative, useNow } from "@/lib/time";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, Link2, MonitorPlay } from "lucide-react";
+import {
+  ArrowUpRight,
+  Link2,
+  MessageSquareText,
+  MonitorPlay,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -166,6 +171,12 @@ export default function Dashboard({ me }: { me: Me }) {
                         >
                           <Link2 />
                           Copy link
+                        </Button>
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link href={`/r/${room.id}/assistant-log`}>
+                            <MessageSquareText />
+                            Assistant log
+                          </Link>
                         </Button>
                         <Button variant="ghost" size="sm" asChild>
                           <Link href={`/r/${room.id}`}>

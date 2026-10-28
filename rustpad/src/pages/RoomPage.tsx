@@ -592,6 +592,7 @@ function Pad({ room, refreshRoom }: { room: Room; refreshRoom: () => void }) {
             language={language}
             editor={editor}
             readOnly={readOnly}
+            name={name}
           />
         )}
       </div>

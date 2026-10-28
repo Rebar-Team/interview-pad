@@ -90,12 +90,12 @@ address. Set `ROOM_TTL_MINUTES=2` to watch a room lock.
 
 The assistant runs inside the existing Rust server, with a right-side chat panel
 and explicitly approved, undoable code edits. Its key stays server-side. Edit
-[`luna.md`](rustpad/rustpad-server/prompts/luna.md) to change its prompt on the
-next request. The prompt asks for missing implementation logic rather than
-solving, optimizing, or refactoring on the candidate's behalf. See
+[`assistant.md`](rustpad/rustpad-server/prompts/assistant.md) to change its prompt on the
+next request. The assistant implements whatever approach the candidate states and
+asks at most one question when they state none. See
 [assistant details and offline checks](rustpad/rustpad-server/prompts/README.md).
 
-Rooms, pad contents and assistant memory are in-process in this local configuration;
+Rooms, pad contents and the assistant chat are in-process in this local configuration;
 server restarts clear them. The terminal uses the existing Docker-based runner,
 which has Docker socket access; submitted programs run in separate non-root,
 resource-limited containers without the socket, host files, or assistant key.

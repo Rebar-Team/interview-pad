@@ -1,5 +1,41 @@
 [
   {
+    "name": "a unified header's section name anchors an insertion",
+    "code": "def a():\n    return 1\n\ndef b():\n    return 2\n",
+    "patch": "@@ -4,2 +4,3 @@ def b():\n+    print('b')",
+    "result": "def a():\n    return 1\n\ndef b():\n    print('b')\n    return 2\n"
+  },
+  {
+    "name": "an unanchored insertion under a unified header is refused, not appended",
+    "code": "def a():\n    return 1\n",
+    "patch": "@@ -1,0 +1,1 @@\n+import os",
+    "result": null
+  },
+  {
+    "name": "unified diff ranges are not mistaken for literal anchors",
+    "code": "def f():\n    return 1\n",
+    "patch": "@@ -1,2 +1,2 @@ def f():\n def f():\n-    return 1\n+    return 2",
+    "result": "def f():\n    return 2\n"
+  },
+  {
+    "name": "single-line unified ranges use content not coordinates",
+    "code": "x = 1\n",
+    "patch": "@@ -99 +99 @@\n-x = 1\n+x = 2",
+    "result": "x = 2\n"
+  },
+  {
+    "name": "unified range coordinates never bypass ambiguous content",
+    "code": "x = 1\nx = 1\n",
+    "patch": "@@ -1 +1 @@\n-x = 1\n+x = 2",
+    "result": null
+  },
+  {
+    "name": "unified range coordinates never bypass missing content",
+    "code": "x = 1\n",
+    "patch": "@@ -1 +1 @@\n-y = 1\n+y = 2",
+    "result": null
+  },
+  {
     "name": "add a function after an anchor keeps every existing line",
     "code": "def a():\n    return 1\n",
     "patch": "@@ def a():\n     return 1\n+\n+def b():\n+    return 2",
