@@ -21,6 +21,8 @@ export default defineConfig({
         SESSION_SECRET: "test-secret-at-least-32-bytes-long-xx",
         DEV_LOGIN_EMAIL: "test@withrebar.ai",
         GOOGLE_ALLOWED_DOMAIN: "withrebar.ai",
+        ASSISTANT_ENABLED: "1",
+        OPENAI_API_KEY: "test-only-not-a-real-key",
       },
     },
     {

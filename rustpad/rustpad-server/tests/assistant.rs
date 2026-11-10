@@ -33,7 +33,7 @@ async fn test_chat_socket_sends_snapshot_and_errors() -> Result<()> {
     let snapshot = socket.recv().await?;
     assert_eq!(
         snapshot,
-        json!({"type": "snapshot", "messages": [], "busy": null})
+        json!({"type": "snapshot", "messages": [], "drafts": [], "busy": null})
     );
     socket
         .send(&json!({"type": "ask", "message": "hi", "code": "", "language": "python"}))

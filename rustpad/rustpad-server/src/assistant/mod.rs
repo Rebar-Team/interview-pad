@@ -18,7 +18,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     sync::{
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -48,6 +48,7 @@ const HISTORY_BYTES: usize = 128_000;
 /// Messages shown when the panel opens.
 const SHOWN_MESSAGES: u32 = 200;
 const MAX_QUESTION_BYTES: usize = 2000;
+const MAX_DRAFT_BYTES: usize = 8000;
 const MAX_CODE_BYTES: usize = 24_000;
 const MAX_AUTHOR_CHARS: usize = 64;
 /// An idle chat nobody is connected to leaves memory after this; it is
@@ -77,6 +78,10 @@ struct Cursor {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ClientMessage {
+    Draft {
+        text: String,
+        author: String,
+    },
     Ask {
         message: String,
         code: String,
@@ -100,6 +105,13 @@ enum ClientMessage {
     },
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct Draft {
+    id: u64,
+    author: String,
+    text: String,
+}
+
 /// To the panel.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -107,6 +119,7 @@ enum Event {
     /// The whole chat, on connecting.
     Snapshot {
         messages: Vec<AssistantMessage>,
+        drafts: Vec<Draft>,
         busy: Option<String>,
     },
     /// A new or updated message.
@@ -116,6 +129,9 @@ enum Event {
     /// Whose question is being answered, if any.
     Busy {
         busy: Option<String>,
+    },
+    Drafts {
+        drafts: Vec<Draft>,
     },
     Cleared,
     /// Only to the client whose request failed.
@@ -128,6 +144,7 @@ enum Event {
 }
 
 struct ChatState {
+    drafts: HashMap<u64, Draft>,
     messages: Vec<AssistantMessage>,
     /// Who asked the question being answered.
     busy: Option<String>,
@@ -139,13 +156,16 @@ struct Chat {
     room: String,
     state: Mutex<ChatState>,
     events: broadcast::Sender<Event>,
+    next_connection: AtomicU64,
 }
 
 impl Chat {
     fn new(room: String, messages: Vec<AssistantMessage>) -> Self {
         Self {
             room,
+            next_connection: AtomicU64::new(0),
             state: Mutex::new(ChatState {
+                drafts: HashMap::new(),
                 messages,
                 busy: None,
                 touched: Instant::now(),
@@ -163,8 +183,30 @@ impl Chat {
         let state = self.state.lock().await;
         Event::Snapshot {
             messages: state.messages.clone(),
+            drafts: state.drafts.values().cloned().collect(),
             busy: state.busy.clone(),
         }
+    }
+
+    async fn update_draft(&self, id: u64, text: String, name: String) {
+        let mut state = self.state.lock().await;
+        if text.is_empty() {
+            if state.drafts.remove(&id).is_none() {
+                return;
+            }
+        } else {
+            state.drafts.insert(
+                id,
+                Draft {
+                    id,
+                    author: author(&name),
+                    text,
+                },
+            );
+        }
+        self.publish(Event::Drafts {
+            drafts: state.drafts.values().cloned().collect(),
+        });
     }
 
     async fn finish(&self) {
@@ -354,9 +396,19 @@ impl Assistant {
     }
 
     /// Handle one message from a panel. An error goes back to that panel only.
-    async fn handle(self: &Arc<Self>, chat: &Arc<Chat>, text: &str) -> Result<(), String> {
+    async fn handle(
+        self: &Arc<Self>,
+        chat: &Arc<Chat>,
+        connection: u64,
+        text: &str,
+    ) -> Result<(), String> {
         let request: ClientMessage =
             serde_json::from_str(text).map_err(|_| "Malformed request".to_owned())?;
+        if matches!(&request, ClientMessage::Draft { text, .. } if text.is_empty()) {
+            chat.update_draft(connection, String::new(), String::new())
+                .await;
+            return Ok(());
+        }
         if !self.enabled {
             return Err("The Interview Assistant is turned off on this server.".into());
         }
@@ -370,6 +422,13 @@ impl Assistant {
             }
         }
         match request {
+            ClientMessage::Draft { text, author } => {
+                if text.len() > MAX_DRAFT_BYTES {
+                    return Err("Draft limit: 8,000 bytes".into());
+                }
+                chat.update_draft(connection, text, author).await;
+                Ok(())
+            }
             ClientMessage::Ask {
                 message,
                 code,
@@ -400,6 +459,8 @@ impl Assistant {
                     }
                     state.busy = Some(name.clone());
                 }
+                chat.update_draft(connection, String::new(), String::new())
+                    .await;
                 chat.publish(Event::Busy {
                     busy: Some(name.clone()),
                 });
@@ -604,9 +665,19 @@ impl Assistant {
 
     /// Serve one panel: the chat so far, then live updates both ways.
     async fn connect(self: Arc<Self>, socket: WebSocket, chat: Arc<Chat>) {
+        let connection = chat.next_connection.fetch_add(1, Ordering::Relaxed);
         let (mut sink, mut stream) = socket.split();
         let mut events = chat.events.subscribe();
-        let send = |event: &Event| warp::ws::Message::text(serde_json::to_string(event).unwrap());
+        let send = |event: &Event| {
+            let mut event = event.clone();
+            match &mut event {
+                Event::Snapshot { drafts, .. } | Event::Drafts { drafts } => {
+                    drafts.retain(|draft| draft.id != connection)
+                }
+                _ => {}
+            }
+            warp::ws::Message::text(serde_json::to_string(&event).unwrap())
+        };
         if sink.send(send(&chat.snapshot().await)).await.is_err() {
             return;
         }
@@ -622,7 +693,7 @@ impl Assistant {
                     Some(Ok(message)) if message.is_close() => break,
                     Some(Ok(message)) => {
                         let Ok(text) = message.to_str() else { continue };
-                        match self.handle(&chat, text).await {
+                        match self.handle(&chat, connection, text).await {
                             Ok(()) => continue,
                             Err(error) => Event::Error {
                                 error,
@@ -639,6 +710,8 @@ impl Assistant {
                 break;
             }
         }
+        chat.update_draft(connection, String::new(), String::new())
+            .await;
         chat.state.lock().await.touched = Instant::now();
     }
 }
@@ -878,7 +951,7 @@ mod tests {
         .await;
         let mut events = chat.events.subscribe();
         state
-            .handle(&chat, &ask("make it 2", "x = 1\n"))
+            .handle(&chat, 0, &ask("make it 2", "x = 1\n"))
             .await
             .unwrap();
         settle(&chat).await;
@@ -922,7 +995,7 @@ mod tests {
     async fn failures_are_shown_logged_and_forgotten() {
         let (state, chat, db) =
             fixture(vec![Err("OpenAI returned HTTP 500: overloaded".into())]).await;
-        state.handle(&chat, &ask("q", "")).await.unwrap();
+        state.handle(&chat, 0, &ask("q", "")).await.unwrap();
         settle(&chat).await;
         let messages = chat.state.lock().await.messages.clone();
         assert_eq!(messages[1].kind, "error");
@@ -938,10 +1011,10 @@ mod tests {
     async fn one_question_at_a_time_and_no_clearing_mid_answer() {
         let (state, chat, _) = fixture(vec![]).await;
         chat.state.lock().await.busy = Some("Grace".into());
-        let err = state.handle(&chat, &ask("q", "")).await.unwrap_err();
+        let err = state.handle(&chat, 0, &ask("q", "")).await.unwrap_err();
         assert!(err.contains("Grace"), "{err}");
         let err = state
-            .handle(&chat, &json!({"type":"clear"}).to_string())
+            .handle(&chat, 0, &json!({"type":"clear"}).to_string())
             .await
             .unwrap_err();
         assert!(err.contains("Wait"), "{err}");
@@ -953,10 +1026,10 @@ mod tests {
             json!({"kind":"answer","message":"Hi.","code":null}),
         ))])
         .await;
-        state.handle(&chat, &ask("hello", "")).await.unwrap();
+        state.handle(&chat, 0, &ask("hello", "")).await.unwrap();
         settle(&chat).await;
         state
-            .handle(&chat, &json!({"type":"clear"}).to_string())
+            .handle(&chat, 0, &json!({"type":"clear"}).to_string())
             .await
             .unwrap();
         assert!(chat.state.lock().await.messages.is_empty());
@@ -976,7 +1049,7 @@ mod tests {
         .await;
         let code = "def f():\n    return x\n";
         document.edit_text(|_| Ok(Some(code.into()))).unwrap();
-        state.handle(&chat, &ask("q", code)).await.unwrap();
+        state.handle(&chat, 0, &ask("q", code)).await.unwrap();
         settle(&chat).await;
         let id = chat.state.lock().await.messages[1].id;
         let apply = |name: &str| json!({"type":"apply","id":id,"author":name}).to_string();
@@ -991,8 +1064,8 @@ mod tests {
         document
             .edit_text(|text| Ok(Some(format!("# notes\n{text}"))))
             .unwrap();
-        state.handle(&chat, &apply("Ada")).await.unwrap();
-        let err = state.handle(&chat, &apply("Grace")).await.unwrap_err();
+        state.handle(&chat, 0, &apply("Ada")).await.unwrap();
+        let err = state.handle(&chat, 0, &apply("Grace")).await.unwrap_err();
         assert_eq!(err, "Ada already applied this edit.");
         assert_eq!(
             document.text(),
@@ -1000,35 +1073,38 @@ mod tests {
         );
         assert_eq!(applied_by().await.as_deref(), Some("Ada"));
 
-        state.handle(&chat, &undo).await.unwrap();
+        state.handle(&chat, 0, &undo).await.unwrap();
         assert_eq!(document.text(), "# notes\ndef f():\n    return x\n");
         assert_eq!(applied_by().await, None);
-        assert!(state.handle(&chat, &undo).await.is_err(), "nothing to undo");
+        assert!(
+            state.handle(&chat, 0, &undo).await.is_err(),
+            "nothing to undo"
+        );
 
         // Someone's Ctrl+Z reverts an applied edit behind the chat's back.
         let reverted = document.text();
-        state.handle(&chat, &apply("Ada")).await.unwrap();
+        state.handle(&chat, 0, &apply("Ada")).await.unwrap();
         document.edit_text(|_| Ok(Some(reverted.clone()))).unwrap();
         // Undo just records it; the code is left alone.
-        state.handle(&chat, &undo).await.unwrap();
+        state.handle(&chat, 0, &undo).await.unwrap();
         assert_eq!(document.text(), reverted);
         assert_eq!(applied_by().await, None);
         // And Apply works again after a Ctrl+Z, too.
-        state.handle(&chat, &apply("Ada")).await.unwrap();
+        state.handle(&chat, 0, &apply("Ada")).await.unwrap();
         document.edit_text(|_| Ok(Some(reverted.clone()))).unwrap();
-        state.handle(&chat, &apply("Grace")).await.unwrap();
+        state.handle(&chat, 0, &apply("Grace")).await.unwrap();
         assert_eq!(applied_by().await.as_deref(), Some("Grace"));
         assert!(document.text().contains("    x = 1\n"));
-        state.handle(&chat, &undo).await.unwrap();
+        state.handle(&chat, 0, &undo).await.unwrap();
         assert_eq!(document.text(), reverted);
 
         // Applied, then edited right where it landed: Undo refuses rather
         // than pretend, and the edit stays marked applied.
-        state.handle(&chat, &apply("Ada")).await.unwrap();
+        state.handle(&chat, 0, &apply("Ada")).await.unwrap();
         document
             .edit_text(|text| Ok(Some(text.replace("    return x\n", "    return x + 1\n"))))
             .unwrap();
-        let err = state.handle(&chat, &undo).await.unwrap_err();
+        let err = state.handle(&chat, 0, &undo).await.unwrap_err();
         assert!(err.contains("modified since"), "{err}");
         assert!(document.text().contains("    x = 1\n    return x + 1\n"));
         assert_eq!(applied_by().await.as_deref(), Some("Ada"));
@@ -1037,14 +1113,95 @@ mod tests {
         document
             .edit_text(|_| Ok(Some("def g():\n    pass\n".into())))
             .unwrap();
-        let err = state.handle(&chat, &apply("Ada")).await.unwrap_err();
+        let err = state.handle(&chat, 0, &apply("Ada")).await.unwrap_err();
         assert!(err.contains("modified after it was proposed"), "{err}");
         assert_eq!(document.text(), "def g():\n    pass\n");
         assert_eq!(applied_by().await.as_deref(), Some("Ada"), "unchanged");
 
         let question = json!({"type":"apply","id":id - 1}).to_string();
-        let err = state.handle(&chat, &question).await.unwrap_err();
+        let err = state.handle(&chat, 0, &question).await.unwrap_err();
         assert!(err.contains("no longer"), "questions have no edit");
+    }
+
+    #[tokio::test]
+    async fn drafts_are_private_to_other_connections_and_never_stored() {
+        let (state, chat, db) = fixture(vec![]).await;
+        let room = chat.room.clone();
+        let connected_state = state.clone();
+        let connected_chat = chat.clone();
+        let route = warp::ws().map(move |ws: Ws| {
+            let state = connected_state.clone();
+            let chat = connected_chat.clone();
+            ws.on_upgrade(move |socket| state.connect(socket, chat))
+        });
+        let mut first = warp::test::ws().handshake(route.clone()).await.unwrap();
+        let mut second = warp::test::ws().handshake(route.clone()).await.unwrap();
+        first.recv().await.unwrap();
+        second.recv().await.unwrap();
+        first
+            .send_text(json!({"type":"draft","author":"Ada","text":"Unsent thought"}).to_string())
+            .await;
+        let own: Value =
+            serde_json::from_str(first.recv().await.unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(own["drafts"], json!([]));
+        let other: Value =
+            serde_json::from_str(second.recv().await.unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(other["drafts"][0]["text"], "Unsent thought");
+        let mut late = warp::test::ws().handshake(route).await.unwrap();
+        let snapshot: Value =
+            serde_json::from_str(late.recv().await.unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(snapshot["drafts"], other["drafts"]);
+        assert_eq!(snapshot["messages"], json!([]));
+        second
+            .send_text(json!({"type":"draft","author":"Ada","text":"Separate thought"}).to_string())
+            .await;
+        let preview: Value =
+            serde_json::from_str(first.recv().await.unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(preview["drafts"][0]["text"], "Separate thought");
+        second.recv().await.unwrap();
+        late.recv().await.unwrap();
+        first.send(warp::ws::Message::close()).await;
+        let cleared: Value =
+            serde_json::from_str(second.recv().await.unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(cleared["drafts"], json!([]));
+        assert_eq!(chat.state.lock().await.drafts.len(), 1);
+        second
+            .send_text(json!({"type":"draft","author":"Ada","text":""}).to_string())
+            .await;
+        second.recv().await.unwrap();
+        assert!(chat.state.lock().await.drafts.is_empty());
+        assert!(db
+            .load_assistant_messages(&room, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(db.load_assistant_log(&room).await.unwrap().is_empty());
+        assert!(state.client.sent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sending_clears_only_the_senders_draft() {
+        let (state, chat, _) = fixture(vec![]).await;
+        state
+            .handle(
+                &chat,
+                1,
+                &json!({"type":"draft","author":"Ada","text":"Question"}).to_string(),
+            )
+            .await
+            .unwrap();
+        state
+            .handle(
+                &chat,
+                2,
+                &json!({"type":"draft","author":"Ada","text":"Other"}).to_string(),
+            )
+            .await
+            .unwrap();
+        state.handle(&chat, 1, &ask("Question", "")).await.unwrap();
+        let locked = chat.state.lock().await;
+        assert!(!locked.drafts.contains_key(&1));
+        assert_eq!(locked.drafts[&2].text, "Other");
     }
 
     #[tokio::test]
@@ -1054,8 +1211,10 @@ mod tests {
             ask("", ""),
             ask("q", &"x".repeat(MAX_CODE_BYTES + 1)),
             "not json".into(),
+            json!({"type":"draft", "author":"Ada", "text":"x".repeat(MAX_DRAFT_BYTES + 1)})
+                .to_string(),
         ] {
-            assert!(state.handle(&chat, &request).await.is_err());
+            assert!(state.handle(&chat, 0, &request).await.is_err());
         }
         let rooms = Rooms::new(None, Duration::ZERO);
         let room = rooms.create("Done", "ada@withrebar.ai").await.unwrap();
@@ -1063,8 +1222,23 @@ mod tests {
         expired.enabled = true;
         let expired = Arc::new(expired);
         let chat = expired.chat(&room.id).await;
-        let err = expired.handle(&chat, &ask("q", "")).await.unwrap_err();
+        let err = expired.handle(&chat, 0, &ask("q", "")).await.unwrap_err();
         assert_eq!(err, "This room is read-only.");
+        let draft = json!({"type":"draft", "author":"Ada", "text":"Unsent"}).to_string();
+        assert_eq!(
+            expired.handle(&chat, 0, &draft).await.unwrap_err(),
+            "This room is read-only."
+        );
+        chat.update_draft(0, "Unsent".into(), "Ada".into()).await;
+        expired
+            .handle(
+                &chat,
+                0,
+                &json!({"type":"draft", "author":"Ada", "text":""}).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(chat.state.lock().await.drafts.is_empty());
         assert!(state.client.sent().is_empty());
     }
 }
