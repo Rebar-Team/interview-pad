@@ -23,6 +23,7 @@ export function NewRoomDialog({ ttlMs }: { ttlMs: number }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [assistantEnabled, setAssistantEnabled] = useState(true);
 
   const reroll = useMutation({
     mutationFn: api.gamertag,
@@ -30,7 +31,7 @@ export function NewRoomDialog({ ttlMs }: { ttlMs: number }) {
   });
 
   const create = useMutation({
-    mutationFn: () => api.createRoom(name.trim()),
+    mutationFn: () => api.createRoom(name.trim(), assistantEnabled),
     onSuccess: (room) => {
       queryClient.invalidateQueries({ queryKey: ["rooms"] });
       setOpen(false);
@@ -43,6 +44,7 @@ export function NewRoomDialog({ ttlMs }: { ttlMs: number }) {
     setOpen(next);
     if (next) {
       setName("");
+      setAssistantEnabled(true);
       reroll.mutate();
     }
   }
@@ -94,6 +96,17 @@ export function NewRoomDialog({ ttlMs }: { ttlMs: number }) {
                 <Dices />
               </Button>
             </div>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <Label htmlFor="room-assistant">Enable assistant</Label>
+            <input
+              id="room-assistant"
+              type="checkbox"
+              role="switch"
+              checked={assistantEnabled}
+              onChange={(e) => setAssistantEnabled(e.target.checked)}
+              className="relative h-5 w-9 shrink-0 cursor-pointer appearance-none rounded-full bg-input transition-colors checked:bg-primary before:absolute before:left-0.5 before:top-0.5 before:size-4 before:rounded-full before:bg-background before:transition-transform checked:before:translate-x-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
           </div>
           <DialogFooter>
             <Button type="submit" disabled={create.isPending}>

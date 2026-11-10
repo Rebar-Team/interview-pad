@@ -114,7 +114,7 @@ ON CONFLICT(id) DO UPDATE SET
     /// Load a room by ID.
     pub async fn load_room(&self, id: &str) -> Result<Option<Room>> {
         sqlx::query_as(
-            r#"SELECT id, name, created_by, created_at, expires_at, ended_at FROM room WHERE id = $1"#,
+            r#"SELECT id, name, created_by, created_at, expires_at, ended_at, assistant_enabled FROM room WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -127,15 +127,16 @@ ON CONFLICT(id) DO UPDATE SET
         sqlx::query(
             r#"
 INSERT INTO
-    room (id, name, created_by, created_at, expires_at)
+    room (id, name, created_by, created_at, expires_at, assistant_enabled)
 VALUES
-    ($1, $2, $3, $4, $5)"#,
+    ($1, $2, $3, $4, $5, $6)"#,
         )
         .bind(&room.id)
         .bind(&room.name)
         .bind(&room.created_by)
         .bind(room.created_at)
         .bind(room.expires_at)
+        .bind(room.assistant_enabled)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -156,7 +157,7 @@ VALUES
         sqlx::query_as(
             // Pads migrated from before rooms existed have no creator; they stay
             // reachable by link but don't belong on the dashboard.
-            r#"SELECT id, name, created_by, created_at, expires_at, ended_at FROM room WHERE created_by != '' ORDER BY created_at DESC LIMIT 500"#,
+            r#"SELECT id, name, created_by, created_at, expires_at, ended_at, assistant_enabled FROM room WHERE created_by != '' ORDER BY created_at DESC LIMIT 500"#,
         )
         .fetch_all(&self.pool)
         .await

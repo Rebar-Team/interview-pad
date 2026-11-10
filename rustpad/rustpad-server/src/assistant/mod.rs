@@ -361,6 +361,9 @@ impl Assistant {
             return Err("The Interview Assistant is turned off on this server.".into());
         }
         match self.rooms.get(&chat.room).await {
+            Ok(Some(room)) if !room.assistant_enabled => {
+                return Err("The assistant is disabled for this room.".into());
+            }
             Ok(Some(room)) if room.writable() => {}
             Ok(Some(_)) => return Err("This room is read-only.".into()),
             Ok(None) => return Err("Room not found".into()),
@@ -793,7 +796,10 @@ mod tests {
         // Keep the file for the test's lifetime.
         std::mem::forget(file);
         let rooms = Rooms::new(Some(db.clone()), Duration::from_secs(3600));
-        let room = rooms.create("Loop", "ada@withrebar.ai").await.unwrap();
+        let room = rooms
+            .create("Loop", "ada@withrebar.ai", true)
+            .await
+            .unwrap();
         let mut state = Assistant::new(
             rooms,
             AuthConfig::default(),
@@ -1048,6 +1054,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_rooms_preserve_history_and_reject_changes() {
+        let (state, _, db) = fixture(vec![]).await;
+        let room = state
+            .rooms
+            .create("Disabled", "ada@withrebar.ai", false)
+            .await
+            .unwrap();
+        db.insert_assistant_message(&room.id, &message(0, "assistant", "answer", "Saved answer"))
+            .await
+            .unwrap();
+        let chat = state.chat(&room.id).await;
+        assert_eq!(chat.state.lock().await.messages[0].content, "Saved answer");
+        for request in [
+            ask("q", ""),
+            r#"{"type":"clear"}"#.into(),
+            r#"{"type":"apply","id":1,"author":"Ada"}"#.into(),
+            r#"{"type":"undo","id":1}"#.into(),
+        ] {
+            assert_eq!(
+                state.handle(&chat, &request).await.unwrap_err(),
+                "The assistant is disabled for this room."
+            );
+        }
+        assert!(state.client.sent().is_empty());
+        assert_eq!(
+            db.load_assistant_messages(&room.id, 10).await.unwrap()[0].content,
+            "Saved answer"
+        );
+    }
+
+    #[tokio::test]
     async fn read_only_rooms_and_bad_input_never_reach_model() {
         let (state, chat, _) = fixture(vec![]).await;
         for request in [
@@ -1058,7 +1095,10 @@ mod tests {
             assert!(state.handle(&chat, &request).await.is_err());
         }
         let rooms = Rooms::new(None, Duration::ZERO);
-        let room = rooms.create("Done", "ada@withrebar.ai").await.unwrap();
+        let room = rooms
+            .create("Done", "ada@withrebar.ai", true)
+            .await
+            .unwrap();
         let mut expired = Assistant::new(rooms, AuthConfig::default(), None, Arc::new(|_| None));
         expired.enabled = true;
         let expired = Arc::new(expired);

@@ -81,6 +81,7 @@ async fn test_create_and_list_rooms() -> Result<()> {
     assert_eq!(named["name"], "Backend loop");
     assert_eq!(named["createdBy"], "ada@withrebar.ai");
     assert_eq!(named["writable"], true);
+    assert_eq!(named["assistantEnabled"], true);
     let six_hours = 6 * 3600 * 1000;
     assert_eq!(
         named["expiresAt"].as_i64().unwrap() - named["createdAt"].as_i64().unwrap(),
@@ -323,6 +324,7 @@ async fn test_legacy_pads_become_read_only_rooms() -> Result<()> {
     assert_eq!(resp.status(), 200);
     let room: Value = serde_json::from_slice(resp.body())?;
     assert_eq!(room["writable"], false);
+    assert_eq!(room["assistantEnabled"], true);
     expect_text(&filter, "legacy", "old").await;
 
     // Readable by link, but kept off the dashboard.
@@ -540,5 +542,58 @@ async fn test_creator_can_end_expired_room_without_open_editor() -> Result<()> {
         .await;
     assert_eq!(resp.status(), 200);
     assert!(connect(&filter, &id).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_room_assistant_setting_survives_restart() -> Result<()> {
+    let path = NamedTempFile::new()?.into_temp_path();
+    let uri = format!("sqlite://{}", path.to_str().unwrap());
+    let database = Database::new(&uri).await?;
+    let filter = server(ServerConfig {
+        database: Some(database.clone()),
+        ..ServerConfig::default()
+    });
+    for enabled in [false, true] {
+        let response = warp::test::request()
+            .method("POST")
+            .path("/api/rooms")
+            .header("cookie", session_cookie())
+            .header("origin", origin())
+            .json(&json!({"name": "Assistant choice", "assistantEnabled": enabled}))
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 201);
+        let room: Value = serde_json::from_slice(response.body())?;
+        assert_eq!(room["assistantEnabled"], enabled);
+        let id = room["id"].as_str().unwrap();
+        assert_eq!(
+            database.load_room(id).await?.unwrap().assistant_enabled,
+            enabled
+        );
+
+        let restarted = server(ServerConfig {
+            database: Some(Database::new(&uri).await?),
+            ..ServerConfig::default()
+        });
+        let response = warp::test::request()
+            .path("/api/rooms")
+            .header("cookie", session_cookie())
+            .reply(&restarted)
+            .await;
+        let rooms: Vec<Value> = serde_json::from_slice(response.body())?;
+        assert_eq!(
+            rooms.iter().find(|room| room["id"] == id).unwrap()["assistantEnabled"],
+            enabled
+        );
+        let response = warp::test::request()
+            .path(&format!("/api/rooms/{id}"))
+            .reply(&restarted)
+            .await;
+        assert_eq!(response.status(), 200);
+        let public: Value = serde_json::from_slice(response.body())?;
+        assert_eq!(public["assistantEnabled"], enabled);
+        assert_eq!(public["writable"], true);
+    }
     Ok(())
 }

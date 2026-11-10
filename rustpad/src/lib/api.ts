@@ -21,6 +21,7 @@ export type Room = {
   serverNow?: number;
   /** Whether the interview assistant is available; public endpoint only. */
   assistant?: boolean;
+  assistantEnabled?: boolean;
 };
 
 /** One assistant interaction, logged in full. */
@@ -85,10 +86,10 @@ export const api = {
   gamertag: () => request<{ name: string }>("/api/gamertag"),
   rooms: () => request<Room[]>("/api/rooms"),
   room: (id: string) => request<Room>(`/api/rooms/${encodeURIComponent(id)}`),
-  createRoom: (name: string) =>
+  createRoom: (name: string, assistantEnabled: boolean) =>
     request<Room>("/api/rooms", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, assistantEnabled }),
     }),
   endRoom: (id: string) =>
     request<Room>(`/api/rooms/${encodeURIComponent(id)}/end`, {

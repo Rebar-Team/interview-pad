@@ -14,6 +14,7 @@ type Props = {
   language: string;
   editor?: editor.IStandaloneCodeEditor;
   readOnly: boolean;
+  enabled: boolean;
   /** This participant's display name, shown on their questions. */
   name: string;
 };
@@ -23,9 +24,11 @@ export default function AssistantPanel({
   padId,
   language,
   editor: ed,
-  readOnly,
+  readOnly: roomReadOnly,
+  enabled,
   name,
 }: Props) {
+  const readOnly = roomReadOnly || !enabled;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   /** A question of ours is on its way, before the server reports it busy. */
@@ -192,8 +195,9 @@ export default function AssistantPanel({
         <div className="space-y-5 p-4">
           {messages.length === 0 && !busy && (
             <p className="text-sm text-muted-foreground">
-              Describe what you want the code to do, and the assistant writes it
-              for you to review and apply. Everyone in this room sees the chat.
+              {readOnly
+                ? "No chat history for this room."
+                : "Describe what you want the code to do, and the assistant writes it for you to review and apply. Everyone in this room sees the chat."}
             </p>
           )}
           {messages.map((message) =>
@@ -234,7 +238,9 @@ export default function AssistantPanel({
         {readOnly ? (
           <div className="flex items-start gap-2 rounded-lg bg-muted px-3 py-2.5 text-xs text-muted-foreground">
             <Lock className="mt-0.5 size-3.5 shrink-0" />
-            The assistant is off because this room is read-only.
+            {enabled
+              ? "The assistant is off because this room is read-only."
+              : "The assistant is disabled for this room. Chat history is read-only."}
           </div>
         ) : (
           <>
