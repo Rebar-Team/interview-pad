@@ -14,15 +14,24 @@ export type ChatMessage = {
   appliedBy: string | null;
 };
 
+export type Draft = { id: number; author: string; text: string };
+
 export type ChatEvent =
-  | { type: "snapshot"; messages: ChatMessage[]; busy: string | null }
+  | {
+      type: "snapshot";
+      messages: ChatMessage[];
+      drafts: Draft[];
+      busy: string | null;
+    }
   | { type: "message"; message: ChatMessage }
   | { type: "busy"; busy: string | null }
+  | { type: "drafts"; drafts: Draft[] }
   | { type: "cleared" }
   /** `request` is the failed request's type, e.g. "ask" or "apply". */
   | { type: "error"; error: string; request: string | null };
 
 export type ChatRequest =
+  | { type: "draft"; text: string; author: string }
   | {
       type: "ask";
       message: string;
@@ -46,6 +55,8 @@ export class AssistantSocket {
   private disposed = false;
   private retries = 0;
   private timer?: number;
+  private draftTimer?: number;
+  private pendingDraft?: Extract<ChatRequest, { type: "draft" }>;
   private readonly padId: string;
   private readonly onEvent: (event: ChatEvent) => void;
   private readonly onConnected: (connected: boolean) => void;
@@ -96,9 +107,26 @@ export class AssistantSocket {
     return true;
   }
 
+  sendDraft(text: string, author: string) {
+    this.pendingDraft = { type: "draft", text, author };
+    if (!text) {
+      window.clearTimeout(this.draftTimer);
+      this.draftTimer = undefined;
+      this.send(this.pendingDraft);
+      this.pendingDraft = undefined;
+    } else if (this.draftTimer === undefined) {
+      this.draftTimer = window.setTimeout(() => {
+        this.draftTimer = undefined;
+        if (this.pendingDraft) this.send(this.pendingDraft);
+        this.pendingDraft = undefined;
+      }, 200);
+    }
+  }
+
   dispose() {
     this.disposed = true;
     window.clearTimeout(this.timer);
+    window.clearTimeout(this.draftTimer);
     this.socket?.close();
   }
 }
