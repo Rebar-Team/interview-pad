@@ -5,8 +5,14 @@ import { cn } from "@/lib/utils";
 import { Info, Lock, Sparkles, TriangleAlert } from "lucide-react";
 import type { editor } from "monaco-editor/esm/vs/editor/editor.api";
 import { useEffect, useRef, useState } from "react";
+import useLocalStorageState from "use-local-storage-state";
 
-import { AssistantSocket, type ChatMessage, applyEvent } from "./client";
+import {
+  AssistantSocket,
+  type ChatMessage,
+  type Draft,
+  applyEvent,
+} from "./client";
 import { type Chunk, collapseContext, parsePatch } from "./proposal";
 
 type Props = {
@@ -29,6 +35,21 @@ export default function AssistantPanel({
   name,
 }: Props) {
   const readOnly = roomReadOnly || !enabled;
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [preferredWidth, setPreferredWidth] = useLocalStorageState<number>(
+    "assistant-width",
+    { defaultValue: 360 },
+  );
+  const [maxWidth, setMaxWidth] = useState(600);
+  const panel = useRef<HTMLElement>(null);
+  const drag = useRef<{ x: number; width: number }>();
+  const minWidth = Math.min(300, maxWidth);
+  const width = Math.max(
+    minWidth,
+    Math.min(maxWidth, Number.isFinite(preferredWidth) ? preferredWidth : 360),
+  );
+  const resize = (next: number) =>
+    setPreferredWidth(Math.max(minWidth, Math.min(maxWidth, next)));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   /** A question of ours is on its way, before the server reports it busy. */
@@ -52,6 +73,8 @@ export default function AssistantPanel({
     const chat = new AssistantSocket(
       padId,
       (event) => {
+        if (event.type === "snapshot" || event.type === "drafts")
+          setDrafts(event.drafts ?? []);
         if (event.type === "error") {
           setError(event.error);
           if (event.request === "apply" || event.request === "undo")
@@ -101,7 +124,10 @@ export default function AssistantPanel({
         }
         setMessages((current) => applyEvent(current, event));
       },
-      setConnected,
+      (connected) => {
+        setConnected(connected);
+        if (!connected) setDrafts([]);
+      },
     );
     socket.current = chat;
     return () => {
@@ -113,6 +139,20 @@ export default function AssistantPanel({
   useEffect(() => {
     end.current?.scrollIntoView({ block: "nearest" });
   }, [messages, busy]);
+
+  useEffect(() => {
+    if (connected) socket.current?.sendDraft(readOnly ? "" : draft, name);
+  }, [draft, name, connected, readOnly]);
+
+  useEffect(() => {
+    const parent = panel.current?.parentElement;
+    if (!parent) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setMaxWidth(Math.max(240, Math.floor(entry.contentRect.width * 0.6)));
+    });
+    observer.observe(parent);
+    return () => observer.disconnect();
+  }, []);
 
   function send() {
     const question = draft.trim(),
@@ -139,6 +179,7 @@ export default function AssistantPanel({
       setError("Not connected to the assistant yet. Reconnecting...");
       return;
     }
+    socket.current?.sendDraft("", name);
     sent.current = question;
     sentBy.current = asker.current;
     setSending(true);
@@ -169,9 +210,51 @@ export default function AssistantPanel({
 
   return (
     <aside
+      ref={panel}
       aria-label="Rebar Interview Assistant"
-      className="flex h-full w-[360px] max-w-[45vw] min-w-[300px] shrink-0 flex-col border-l bg-muted/30"
+      style={{ width }}
+      className="relative flex h-full shrink-0 flex-col border-l bg-muted/30"
     >
+      <div
+        role="separator"
+        aria-label="Resize assistant sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={minWidth}
+        aria-valuemax={maxWidth}
+        aria-valuenow={width}
+        tabIndex={0}
+        className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize touch-none hover:bg-primary/20 focus-visible:bg-primary/20 focus-visible:outline-none"
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          drag.current = { x: event.clientX, width };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (drag.current)
+            resize(drag.current.width + drag.current.x - event.clientX);
+        }}
+        onPointerUp={(event) => {
+          drag.current = undefined;
+          if (event.currentTarget.hasPointerCapture(event.pointerId))
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onLostPointerCapture={() => {
+          drag.current = undefined;
+        }}
+        onKeyDown={(event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
+            return;
+          event.preventDefault();
+          resize(
+            event.key === "Home"
+              ? minWidth
+              : event.key === "End"
+                ? maxWidth
+                : width + (event.key === "ArrowLeft" ? 20 : -20),
+          );
+        }}
+      />
       <div className="flex h-11 shrink-0 items-center justify-between border-b px-4">
         <div className="flex items-center gap-1.5 text-sm font-medium">
           <Sparkles className="size-3.5 text-muted-foreground" />
@@ -230,6 +313,21 @@ export default function AssistantPanel({
         </div>
       </ScrollArea>
       <div className="shrink-0 border-t p-3">
+        {drafts.length > 0 && (
+          <div
+            aria-label="Other participants' drafts"
+            className="mb-3 max-h-40 space-y-3 overflow-y-auto text-sm text-muted-foreground"
+          >
+            {drafts.map((draft) => (
+              <div key={draft.id}>
+                <p className="text-xs font-medium">{draft.author} is typing…</p>
+                <p className="whitespace-pre-wrap wrap-anywhere">
+                  {draft.text}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
         {error && (
           <p role="alert" className="mb-2 text-xs text-destructive">
             {error}
@@ -246,6 +344,7 @@ export default function AssistantPanel({
           <>
             <Textarea
               aria-label="Ask Rebar Interview Assistant"
+              aria-describedby="assistant-draft-notice"
               placeholder="Ask the Interview Assistant"
               value={draft}
               rows={3}
@@ -259,6 +358,12 @@ export default function AssistantPanel({
                 }
               }}
             />
+            <p
+              id="assistant-draft-notice"
+              className="mt-2 text-xs text-muted-foreground"
+            >
+              Your draft is visible to everyone in this room.
+            </p>
             <div className="mt-2 flex items-center justify-between">
               <span className="text-xs text-muted-foreground">
                 Enter to send

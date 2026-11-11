@@ -585,7 +585,7 @@ function Pad({ room, refreshRoom }: { room: Room; refreshRoom: () => void }) {
             />
           </div>
         )}
-        {(room.assistant !== false || room.assistantEnabled === false) && (
+        {room.assistant !== false && (
           <AssistantPanel
             key={id}
             padId={id}

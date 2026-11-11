@@ -38,6 +38,14 @@ test("room creation can disable the assistant while keeping its history panel", 
   await page.reload();
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("textbox")).toHaveCount(0);
+  await page.route(`**/api/rooms/${id}`, async (route) => {
+    const response = await route.fetch();
+    const room = await response.json();
+    await route.fulfill({ response, json: { ...room, assistant: false } });
+  });
+  await page.reload();
+  await expect(page.locator(".monaco-editor").first()).toBeVisible();
+  await expect(panel).toHaveCount(0);
   await page.goto(BASE_URL);
   await page.getByRole("button", { name: "New room", exact: true }).click();
   await expect(toggle).toBeChecked();
