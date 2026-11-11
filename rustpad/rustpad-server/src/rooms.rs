@@ -27,6 +27,8 @@ pub struct Room {
     pub expires_at: i64,
     /// When the creator ended the interview, if ended manually.
     pub ended_at: Option<i64>,
+    /// Whether participants can use the assistant in this room.
+    pub assistant_enabled: bool,
 }
 
 impl Room {
@@ -88,7 +90,12 @@ impl Rooms {
     }
 
     /// Create a new room.
-    pub async fn create(&self, name: &str, created_by: &str) -> Result<Room> {
+    pub async fn create(
+        &self,
+        name: &str,
+        created_by: &str,
+        assistant_enabled: bool,
+    ) -> Result<Room> {
         let created_at = now_ms();
         let room = Room {
             id: room_id(),
@@ -97,6 +104,7 @@ impl Rooms {
             created_at,
             expires_at: created_at + self.ttl.as_millis() as i64,
             ended_at: None,
+            assistant_enabled,
         };
         if let Some(db) = &self.database {
             db.store_room(&room).await?;
@@ -128,11 +136,18 @@ impl Rooms {
 
 /// Request body for creating a room.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRoom {
     /// Optional display name; blank means a generated gamertag.
     #[serde(default)]
     pub name: String,
+    /// Whether participants can use the assistant in this room.
+    #[serde(default = "assistant_enabled_by_default")]
+    pub assistant_enabled: bool,
+}
+
+fn assistant_enabled_by_default() -> bool {
+    true
 }
 
 /// Maximum length of a room name, in characters.
@@ -191,7 +206,10 @@ mod tests {
     #[tokio::test]
     async fn rooms_lock_after_ttl() {
         let rooms = Rooms::new(None, Duration::from_millis(50));
-        let room = rooms.create("Loop", "ada@withrebar.ai").await.unwrap();
+        let room = rooms
+            .create("Loop", "ada@withrebar.ai", true)
+            .await
+            .unwrap();
         assert!(room.writable());
         assert_eq!(rooms.get(&room.id).await.unwrap(), Some(room.clone()));
         tokio::time::sleep(Duration::from_millis(60)).await;

@@ -262,6 +262,7 @@ struct PublicRoom<'a> {
     server_now: i64,
     /// Whether the interview assistant is available on this server.
     assistant: bool,
+    assistant_enabled: bool,
     ended_at: Option<i64>,
     can_end: bool,
 }
@@ -276,6 +277,7 @@ impl<'a> From<&'a Room> for PublicRoom<'a> {
             writable: room.writable(),
             server_now: rooms::now_ms(),
             assistant: assistant::enabled(),
+            assistant_enabled: room.assistant_enabled,
             ended_at: room.ended_at,
             can_end: false,
         }
@@ -357,7 +359,11 @@ async fn create_room_handler(
     } else {
         name.to_owned()
     };
-    match state.rooms.create(&name, &user.email).await {
+    match state
+        .rooms
+        .create(&name, &user.email, body.assistant_enabled)
+        .await
+    {
         Ok(room) => {
             info!("{} created room {} ({})", user.email, room.id, room.name);
             warp::reply::with_status(
