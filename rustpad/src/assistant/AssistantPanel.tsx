@@ -20,7 +20,6 @@ type Props = {
   language: string;
   editor?: editor.IStandaloneCodeEditor;
   readOnly: boolean;
-  enabled: boolean;
   /** This participant's display name, shown on their questions. */
   name: string;
 };
@@ -30,11 +29,9 @@ export default function AssistantPanel({
   padId,
   language,
   editor: ed,
-  readOnly: roomReadOnly,
-  enabled,
+  readOnly,
   name,
 }: Props) {
-  const readOnly = roomReadOnly || !enabled;
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [preferredWidth, setPreferredWidth] = useLocalStorageState<number>(
     "assistant-width",
@@ -336,9 +333,7 @@ export default function AssistantPanel({
         {readOnly ? (
           <div className="flex items-start gap-2 rounded-lg bg-muted px-3 py-2.5 text-xs text-muted-foreground">
             <Lock className="mt-0.5 size-3.5 shrink-0" />
-            {enabled
-              ? "The assistant is off because this room is read-only."
-              : "The assistant is disabled for this room. Chat history is read-only."}
+            The assistant is off because this room is read-only.
           </div>
         ) : (
           <>
