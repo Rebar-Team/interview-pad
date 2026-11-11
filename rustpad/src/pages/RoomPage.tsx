@@ -585,14 +585,13 @@ function Pad({ room, refreshRoom }: { room: Room; refreshRoom: () => void }) {
             />
           </div>
         )}
-        {room.assistant !== false && (
+        {room.assistant !== false && room.assistantEnabled !== false && (
           <AssistantPanel
             key={id}
             padId={id}
             language={language}
             editor={editor}
             readOnly={readOnly}
-            enabled={room.assistantEnabled !== false}
             name={name}
           />
         )}
