@@ -1,3 +1,4 @@
+import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
@@ -405,9 +406,7 @@ function Reply({
     );
   return (
     <div className="space-y-3">
-      <p className="text-sm wrap-anywhere whitespace-pre-wrap">
-        {message.content}
-      </p>
+      <Markdown className="text-sm">{message.content}</Markdown>
       {message.notice && (
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <Info className="mt-px size-3.5 shrink-0" />

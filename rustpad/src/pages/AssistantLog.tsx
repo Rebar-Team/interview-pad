@@ -1,5 +1,6 @@
 import { Brand } from "@/components/Brand";
 import { Link } from "@/components/Link";
+import { Markdown } from "@/components/Markdown";
 import { NotFound } from "@/components/NotFound";
 import { Button } from "@/components/ui/button";
 import {
@@ -115,7 +116,7 @@ function Entry({ entry }: { entry: AssistantLogEntry }) {
           </p>
         ) : (
           <div className="space-y-2">
-            <p className="whitespace-pre-wrap">{entry.reply.content}</p>
+            <Markdown>{entry.reply.content}</Markdown>
             {entry.reply.notice && (
               <p className="text-xs text-muted-foreground">
                 {entry.reply.notice}

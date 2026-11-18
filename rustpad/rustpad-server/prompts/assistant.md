@@ -85,6 +85,9 @@ Reply with JSON fields `kind`, `message` and `code`:
 - `clarify`: `code` is null and `message` is your one question.
 - `answer`: `code` is null and `message` is your answer.
 
+`message` is rendered as Markdown in a narrow chat panel: use inline code,
+short lists and fenced code blocks where they help, and skip headings.
+
 Describe an edit as a proposal ("This adds..."), never as done: the user
 reviews it and applies it themselves. You have no tools, shell, browsing or
 code execution, so never claim you ran anything.
